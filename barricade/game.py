@@ -170,13 +170,13 @@ class Barricade:
 
     # ----- apply -----
 
-    def apply(self, action):
+    def apply(self, action, check=True):
         kind, arg = action
         if self.winner is not None:
             raise ValueError("game over")
         player = self.turn
         if kind == "move":
-            if arg not in self.legal_moves(player):
+            if check and arg not in self.legal_moves(player):
                 raise ValueError("illegal move")
             self.positions[player] = arg
             self.history.append(("move", player, arg))
@@ -184,7 +184,7 @@ class Barricade:
                 self.winner = player
         elif kind == "wall":
             ori, r, c = arg
-            if self.walls_left[player] <= 0 or not self.wall_valid(ori, r, c):
+            if check and (self.walls_left[player] <= 0 or not self.wall_valid(ori, r, c)):
                 raise ValueError("illegal wall")
             self._place_wall(ori, r, c)
             self.walls_left[player] -= 1

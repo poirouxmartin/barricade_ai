@@ -2,12 +2,14 @@
 
 Iterative deepening with a transposition table.
 
-Perf levers to keep the branching factor small:
+The search hot path (flood-fill distances, wall validity) runs on bitboards
+(`barricade.engine.bitboard`) instead of the rule engine's Python BFS.
+
+Branching control:
   * wall moves are only considered near the opponent's shortest path to its
     goal (plus a small window around our own pawn), capped to `wall_cap`;
   * move actions are searched before wall actions, so early beta cutoffs
-    skip the expensive wall generation entirely;
-  * moves are ordered by row progress toward the goal (free, no BFS).
+    skip the expensive wall generation entirely.
 
 `choose_move` returns the best legal action. `last_info` reports the search
 statistics (depth reached, nodes, score).
@@ -17,8 +19,17 @@ import random
 import time
 from collections import deque
 
+from barricade.engine import evaluate
 from barricade.engine.base import Engine
-from barricade.engine.evaluate import evaluate
+from barricade.engine.bitboard import (
+    GOAL0,
+    GOAL1,
+    INF,
+    build_masks,
+    flood_dist,
+    idx,
+    wall_ok,
+)
 from barricade.game import ROWS, goal_row
 
 MATE = 100000
@@ -55,11 +66,10 @@ class AlphaBetaEngine(Engine):
         alpha, beta = -MATE - 1, MATE + 1
         best_action, best_score = None, None
         player = game.turn
+        masks = build_masks(game.h_walls, game.v_walls)
 
-        def consider(action):
+        def consider(action, g):
             nonlocal alpha, best_score, best_action
-            g = game.clone()
-            g.apply(action)
             s = self._negamax(g, depth - 1, -beta, -alpha)
             if s is None:
                 return False
@@ -71,21 +81,25 @@ class AlphaBetaEngine(Engine):
             return True
 
         moves = sorted(game.legal_moves(player),
-                       key=lambda m: self._move_key(m, player))
+                       key=lambda m: self._move_key(m, masks[0], masks[1], GOAL0 if player == 0 else GOAL1))
         if hint and hint[0] == "move" and hint[1] in moves:
             moves.remove(hint[1])
             moves.insert(0, hint[1])
         for m in moves:
-            if not consider(("move", m)):
+            g = game.clone()
+            g.apply(("move", m), check=False)
+            if not consider(("move", m), g):
                 return None
 
         if game.walls_left[player] > 0:
-            walls = self._wall_candidates(game, cap=self.wall_cap * 2)
+            walls = self._wall_candidates(game, masks, cap=self.wall_cap * 2)
             if hint and hint[0] == "wall" and hint[1] in walls:
                 walls.remove(hint[1])
                 walls.insert(0, hint[1])
-            for w in walls:
-                if not consider(("wall", w)):
+            for wall in walls:
+                g = game.clone()
+                g.apply(("wall", wall), check=False)
+                if not consider(("wall", wall), g):
                     return None
 
         return best_action, best_score
@@ -96,8 +110,17 @@ class AlphaBetaEngine(Engine):
         self.nodes += 1
         if game.winner is not None:
             return -MATE + len(game.history)
+
+        hb, vb, hs, vs = build_masks(game.h_walls, game.v_walls)
+        i0 = idx(*game.positions[0])
+        i1 = idx(*game.positions[1])
+
         if depth <= 0:
-            return evaluate(game, game.turn)
+            p = game.turn
+            d0 = flood_dist(i0, hb, vb, GOAL0)
+            d1 = flood_dist(i1, hb, vb, GOAL1)
+            return evaluate.score(d0 if p == 0 else d1, d1 if p == 0 else d0,
+                                  game.walls_left[p], game.walls_left[1 - p])
 
         key = self._key(game)
         entry = self.tt.get(key)
@@ -113,10 +136,11 @@ class AlphaBetaEngine(Engine):
         player = game.turn
         original_alpha = alpha
 
-        # phase 1: moves (cheap), ordered by row progress
-        for m in sorted(game.legal_moves(player), key=lambda m: self._move_key(m, player)):
+        # phase 1: moves (cheap), ordered by resulting distance to goal
+        for m in sorted(game.legal_moves(player),
+                        key=lambda m: self._move_key(m, hb, vb, GOAL0 if player == 0 else GOAL1)):
             g = game.clone()
-            g.apply(("move", m))
+            g.apply(("move", m), check=False)
             s = self._negamax(g, depth - 1, -beta, -alpha)
             if s is None:
                 return None
@@ -130,9 +154,9 @@ class AlphaBetaEngine(Engine):
 
         # phase 2: walls (expensive, generated lazily)
         if game.walls_left[player] > 0:
-            for wall in self._wall_candidates(game, cap=self.wall_cap):
+            for wall in self._wall_candidates(game, (hb, vb, hs, vs), cap=self.wall_cap):
                 g = game.clone()
-                g.apply(("wall", wall))
+                g.apply(("wall", wall), check=False)
                 s = self._negamax(g, depth - 1, -beta, -alpha)
                 if s is None:
                     return None
@@ -148,33 +172,34 @@ class AlphaBetaEngine(Engine):
             self.tt[key] = (depth, alpha, 0 if alpha > original_alpha else 2)
         return alpha
 
-    # ----- move generation helpers -----
+    # ----- move/wall generation helpers -----
 
-    def _move_key(self, m, player):
-        # row progress toward the goal: P0 goes up (lower row), P1 goes down
-        return m[0] if player == 0 else ROWS - 1 - m[0]
+    def _move_key(self, m, hb, vb, goal):
+        return flood_dist(idx(*m), hb, vb, goal)
 
-    def _wall_candidates(self, game, cap):
+    def _wall_candidates(self, game, masks, cap):
+        hb, vb, hs, vs = masks
         slots = set()
         for (r, c) in self._opp_path_cells(game):
             for rr in (r - 1, r):
                 for cc in (c - 1, c):
                     if 0 <= rr < ROWS - 1 and 0 <= cc < ROWS - 1:
                         slots.add((rr, cc))
-        # small window around our own pawn as well
         pr, pc = game.positions[game.turn]
         for rr in range(max(0, pr - 1), min(ROWS - 1, pr + 2)):
             for cc in range(max(0, pc - 1), min(ROWS - 1, pc + 2)):
                 slots.add((rr, cc))
         op = game.positions[1 - game.turn]
         ordered = sorted(slots, key=lambda s: abs(s[0] - op[0]) + abs(s[1] - op[1]))
+        i0 = idx(*game.positions[0])
+        i1 = idx(*game.positions[1])
         out = []
         for (r, c) in ordered:
             if len(out) >= cap:
                 break
-            if game.wall_valid("H", r, c):
+            if wall_ok(hb, vb, hs, vs, "H", r, c, i0, i1):
                 out.append(("H", r, c))
-            if game.wall_valid("V", r, c):
+            if wall_ok(hb, vb, hs, vs, "V", r, c, i0, i1):
                 out.append(("V", r, c))
         return out
 

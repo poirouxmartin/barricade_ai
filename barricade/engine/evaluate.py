@@ -16,14 +16,15 @@ WALL_W = 1.0
 CONF_W = 0.12  # confidence penalty per opponent wall remaining
 
 
-def evaluate(game, player):
-    my_d = game.dist_to_goal(player)
-    opp_d = game.dist_to_goal(1 - player)
-
+def score(my_d, opp_d, my_walls, opp_walls):
+    """Score from distances and wall counts. Higher is better for the player."""
     dist_adv = (opp_d - my_d) * DIST_W
     if dist_adv > 0:
-        confidence = max(1.0 - CONF_W * game.walls_left[1 - player], 0.05)
+        confidence = max(1.0 - CONF_W * opp_walls, 0.05)
         dist_adv *= confidence
+    return dist_adv + (my_walls - opp_walls) * WALL_W
 
-    wall_adv = (game.walls_left[player] - game.walls_left[1 - player]) * WALL_W
-    return dist_adv + wall_adv
+
+def evaluate(game, player):
+    return score(game.dist_to_goal(player), game.dist_to_goal(1 - player),
+                game.walls_left[player], game.walls_left[1 - player])

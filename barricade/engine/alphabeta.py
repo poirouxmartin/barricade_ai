@@ -17,7 +17,6 @@ statistics (depth reached, nodes, score).
 
 import random
 import time
-from collections import deque
 
 from barricade.engine import evaluate
 from barricade.engine.base import Engine
@@ -27,10 +26,11 @@ from barricade.engine.bitboard import (
     INF,
     build_masks,
     flood_dist,
+    flood_dists,
     idx,
     wall_ok,
 )
-from barricade.game import ROWS, goal_row
+from barricade.game import COLS, ROWS
 
 MATE = 100000
 
@@ -44,6 +44,7 @@ class AlphaBetaEngine(Engine):
         self.nodes = 0
         self.deadline = 0.0
         self.last_info = {}
+        self.buf = [0] * 81  # scratch distance field, reused per node
 
     def choose_move(self, game):
         self.tt = {}
@@ -67,6 +68,9 @@ class AlphaBetaEngine(Engine):
         best_action, best_score = None, None
         player = game.turn
         masks = build_masks(game.h_walls, game.v_walls)
+        goal = GOAL0 if player == 0 else GOAL1
+        flood_dists(idx(*game.positions[player]), masks[0], masks[1], self.buf)
+        buf = self.buf
 
         def consider(action, g):
             nonlocal alpha, best_score, best_action
@@ -80,8 +84,7 @@ class AlphaBetaEngine(Engine):
                 alpha = s
             return True
 
-        moves = sorted(game.legal_moves(player),
-                       key=lambda m: self._move_key(m, masks[0], masks[1], GOAL0 if player == 0 else GOAL1))
+        moves = sorted(game.legal_moves(player), key=lambda m: buf[idx(*m)])
         if hint and hint[0] == "move" and hint[1] in moves:
             moves.remove(hint[1])
             moves.insert(0, hint[1])
@@ -136,9 +139,9 @@ class AlphaBetaEngine(Engine):
         player = game.turn
         original_alpha = alpha
 
-        # phase 1: moves (cheap), ordered by resulting distance to goal
-        for m in sorted(game.legal_moves(player),
-                        key=lambda m: self._move_key(m, hb, vb, GOAL0 if player == 0 else GOAL1)):
+        # phase 1: moves (cheap), ordered by one distance field from our pawn
+        flood_dists(idx(*game.positions[player]), hb, vb, self.buf)
+        for m in sorted(game.legal_moves(player), key=lambda m: self.buf[idx(*m)]):
             g = game.clone()
             g.apply(("move", m), check=False)
             s = self._negamax(g, depth - 1, -beta, -alpha)
@@ -174,13 +177,10 @@ class AlphaBetaEngine(Engine):
 
     # ----- move/wall generation helpers -----
 
-    def _move_key(self, m, hb, vb, goal):
-        return flood_dist(idx(*m), hb, vb, goal)
-
     def _wall_candidates(self, game, masks, cap):
         hb, vb, hs, vs = masks
         slots = set()
-        for (r, c) in self._opp_path_cells(game):
+        for (r, c) in self._opp_path_cells(game, hb, vb):
             for rr in (r - 1, r):
                 for cc in (c - 1, c):
                     if 0 <= rr < ROWS - 1 and 0 <= cc < ROWS - 1:
@@ -203,29 +203,46 @@ class AlphaBetaEngine(Engine):
                 out.append(("V", r, c))
         return out
 
-    def _opp_path_cells(self, game):
-        """Cells of one shortest path from the opponent pawn to its goal."""
+    def _opp_path_cells(self, game, hb, vb):
+        """Cells of one shortest path from the opponent pawn to its goal
+        (reconstructed from the bitboard distance field, no Python BFS)."""
         opp = 1 - game.turn
-        start = game.positions[opp]
-        parent = {start: None}
-        q = deque([start])
-        target = None
-        while q:
-            cell = q.popleft()
-            if cell[0] == goal_row(opp):
-                target = cell
-                break
-            for n in game.neighbors(*cell):
-                if n not in parent:
-                    parent[n] = cell
-                    q.append(n)
-        if target is None:
+        start = idx(*game.positions[opp])
+        goal = GOAL0 if opp == 0 else GOAL1
+        flood_dists(start, hb, vb, self.buf)
+        buf = self.buf
+        g = goal
+        best, bd = -1, -1
+        while g:
+            b = g & -g
+            i = b.bit_length() - 1
+            if buf[i] >= 0 and (bd < 0 or buf[i] < bd):
+                best, bd = i, buf[i]
+            g &= g - 1
+        if best < 0:
             return []
-        path = []
-        while target is not None:
-            path.append(target)
-            target = parent[target]
-        return path
+        path = [best]
+        while buf[path[-1]] > 0:
+            cur = path[-1]
+            nxt = self._step_back(cur, buf)
+            if nxt is None:
+                break
+            path.append(nxt)
+        return [(i // COLS, i % COLS) for i in reversed(path)]
+
+    def _step_back(self, i, buf):
+        """A neighbor of cell i whose distance field is one less (path to start)."""
+        r, c = divmod(i, COLS)
+        d = buf[i] - 1
+        for cand in (
+            (i - COLS if r > 0 else -1),
+            (i + COLS if r < ROWS - 1 else -1),
+            (i - 1 if c > 0 else -1),
+            (i + 1 if c < COLS - 1 else -1),
+        ):
+            if cand >= 0 and buf[cand] == d:
+                return cand
+        return None
 
     def _key(self, game):
         return (game.positions[0], game.positions[1], game.turn,

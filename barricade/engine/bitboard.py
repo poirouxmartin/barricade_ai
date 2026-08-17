@@ -60,6 +60,33 @@ def flood_dist(start, hb, vb, goal):
     return INF
 
 
+def flood_dists(start, hb, vb, buf):
+    """Fill `buf` (len SIZE) with BFS distances from `start`. -1 = unreachable."""
+    for i in range(SIZE):
+        buf[i] = -1
+    buf[start] = 0
+    frontier = 1 << start
+    seen = frontier
+    up_b = hb << COLS
+    left_b = vb << 1
+    d = 0
+    while frontier:
+        d += 1
+        nxt = (frontier & ~up_b) >> COLS
+        nxt |= (frontier & ~hb) << COLS
+        nxt |= (frontier & ~left_b & ~COL0) >> 1
+        nxt |= (frontier & ~vb & ~COL8) << 1
+        nxt &= BOARD & ~seen
+        cells = nxt
+        while cells:
+            b = cells & -cells
+            buf[b.bit_length() - 1] = d
+            cells &= cells - 1
+        seen |= nxt
+        frontier = nxt
+    return d - 1 if d else 0
+
+
 def wall_ok(hb, vb, hs, vs, ori, r, c, idx0, idx1):
     """Full wall validity: mechanical checks + both players keep a path."""
     slot = 1 << (r * (COLS - 1) + c)

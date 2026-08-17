@@ -1,0 +1,28 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 20px;
+  background: #22242a; color: #eee;
+  font-family: system-ui, sans-serif;
+}
+#app { max-width: 648px; margin: 0 auto; }
+h1 { margin: 0 0 8px; font-size: 22px; }
+#topbar {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #2c2f38; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px;
+}
+.player { font-weight: 600; }
+.player.active { color: #ffd54f; }
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; }
+.wcount { opacity: .7; font-weight: 400; }
+#status { font-weight: 600; color: #ffd54f; }
+canvas {
+  display: block; width: 100%; border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4); cursor: pointer;
+}
+#controls { display: flex; gap: 8px; margin-top: 10px; }
+button {
+  background: #3a3f4b; color: #eee; border: 1px solid #555d6b;
+  padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+button:hover { background: #4a5060; }
+#hint { opacity: .75; font-size: 13px; margin-top: 10px; }

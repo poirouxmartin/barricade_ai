@@ -1,0 +1,20 @@
+"""Launch the Barricade web UI.
+
+Usage: python run.py [--host 127.0.0.1] [--port 8000]
+"""
+
+import argparse
+
+from barricade.web.server import serve
+
+
+def main():
+    p = argparse.ArgumentParser(description="Barricade local server")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    args = p.parse_args()
+    serve(args.host, args.port)
+
+
+if __name__ == "__main__":
+    main()

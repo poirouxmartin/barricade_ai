@@ -26,5 +26,5 @@ Modes via "New game" : PvP, vs AI (greedy), vs AI (alpha-beta), AI vs AI.
 
 1. ✅ Alpha-beta (negamax) : deepening itératif, table de transposition, ordre des coups, murs ciblés.
 2. ✅ Évaluation : distance à l'arrivée → différence avec l'adversaire, ratio de confiance pondéré par les barricades adverses.
-3. ⏳ Accélération du hot-loop (numba/C++/bitboards) pour gagner en profondeur.
+3. 🚧 Accélération : bitboards (`engine/bitboard.py`) — ~50k nœuds/s, depth 7 en 2s. Reste : numba/C++ si besoin de plus.
 4. ⏳ Réseau de neurones (supervisé ou RL) si besoin.

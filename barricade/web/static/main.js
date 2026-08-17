@@ -198,16 +198,17 @@ modeBtn.addEventListener('click', () => {
 
 // ----- new game -----
 
-function startNew(mode2, aiPlayer) {
-  return api('/api/new', { mode: mode2, ai_player: aiPlayer });
+function startNew(mode2, aiPlayer, engine) {
+  return api('/api/new', { mode: mode2, ai_player: aiPlayer, engine });
 }
 
 document.getElementById('btn-new').addEventListener('click', async () => {
-  const choice = prompt('Mode:\n1 = PvP\n2 = vs AI\n3 = AI vs AI');
+  const choice = prompt('Mode:\n1 = PvP\n2 = vs AI (greedy)\n3 = vs AI (alpha-beta)\n4 = AI vs AI (alpha-beta)');
   let state2;
   if (choice === '1') state2 = await startNew('pvp');
-  else if (choice === '2') state2 = await startNew('ai', 1);
-  else if (choice === '3') state2 = await startNew('ai2');
+  else if (choice === '2') state2 = await startNew('ai', 1, 'greedy');
+  else if (choice === '3') state2 = await startNew('ai', 1, 'alphabeta');
+  else if (choice === '4') state2 = await startNew('ai2', 1, 'alphabeta');
   else return;
   state = state2; selected = null; hover = null;
   render();

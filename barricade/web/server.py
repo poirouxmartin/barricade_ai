@@ -3,41 +3,50 @@
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Lock
+from threading import RLock
 from urllib.parse import urlparse
 
 from barricade.game import Barricade
+from barricade.engine.alphabeta import AlphaBetaEngine
 from barricade.engine.greedy import GreedyEngine
 from barricade.engine.random import RandomEngine
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-ENGINES = {"random": RandomEngine, "greedy": GreedyEngine}
+ENGINES = {"random": RandomEngine, "greedy": GreedyEngine, "alphabeta": AlphaBetaEngine}
 
 
 class App:
-    def __init__(self):
-        self.lock = Lock()
+    def __init__(self, depth=8, time_limit=2.0):
+        self.lock = RLock()
         self.game = Barricade()
         self.ai_player = None  # None=pvp, 0/1=vs AI, 'both'=AI vs AI
-        self.engine = GreedyEngine()
+        self.depth = depth
+        self.time_limit = time_limit
+        self.engine = self._make_engine("alphabeta")
 
     def _with_lock(self, fn):
         with self.lock:
             return fn()
 
-    def new(self, mode, ai_player=1, engine="greedy"):
+    def new(self, mode, ai_player=1, engine="alphabeta"):
         def _new():
             self.game = Barricade()
             if mode == "ai":
                 self.ai_player = ai_player if ai_player in (0, 1) else 1
-                self.engine = ENGINES.get(engine, GreedyEngine)()
+                self.engine = self._make_engine(engine)
             elif mode == "ai2":
                 self.ai_player = "both"
-                self.engine = ENGINES.get(engine, GreedyEngine)()
+                self.engine = self._make_engine(engine)
             else:
                 self.ai_player = None
             return self.state()
         return self._with_lock(_new)
+
+    def _make_engine(self, name):
+        cls = ENGINES.get(name, AlphaBetaEngine)
+        if cls is AlphaBetaEngine:
+            return cls(max_depth=self.depth, time_limit=self.time_limit)
+        return cls()
 
     def state(self):
         def _state():
@@ -139,10 +148,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
 
-def serve(host="127.0.0.1", port=8000):
-    Handler.app = App()
+def serve(host="127.0.0.1", port=8000, depth=8, time_limit=2.0):
+    Handler.app = App(depth=depth, time_limit=time_limit)
     httpd = ThreadingHTTPServer((host, port), Handler)
-    print(f"Barricade on http://{host}:{port}")
+    print(f"Barricade on http://{host}:{port}  (AI: depth {depth}, {time_limit}s)")
     httpd.serve_forever()
 
 

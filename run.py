@@ -12,8 +12,10 @@ def main():
     p = argparse.ArgumentParser(description="Barricade local server")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--depth", type=int, default=8, help="max alpha-beta depth")
+    p.add_argument("--time", type=float, default=2.0, help="alpha-beta time limit (s)")
     args = p.parse_args()
-    serve(args.host, args.port)
+    serve(args.host, args.port, args.depth, args.time)
 
 
 if __name__ == "__main__":

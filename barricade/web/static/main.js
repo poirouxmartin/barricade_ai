@@ -203,12 +203,13 @@ function startNew(mode2, aiPlayer, engine) {
 }
 
 document.getElementById('btn-new').addEventListener('click', async () => {
-  const choice = prompt('Mode:\n1 = PvP\n2 = vs AI (greedy)\n3 = vs AI (alpha-beta)\n4 = AI vs AI (alpha-beta)');
+  const choice = prompt('Mode:\n1 = PvP\n2 = vs AI (greedy)\n3 = vs AI (kernel)\n4 = vs AI (alpha-beta)\n5 = AI vs AI (kernel)');
   let state2;
   if (choice === '1') state2 = await startNew('pvp');
   else if (choice === '2') state2 = await startNew('ai', 1, 'greedy');
-  else if (choice === '3') state2 = await startNew('ai', 1, 'alphabeta');
-  else if (choice === '4') state2 = await startNew('ai2', 1, 'alphabeta');
+  else if (choice === '3') state2 = await startNew('ai', 1, 'kernel');
+  else if (choice === '4') state2 = await startNew('ai', 1, 'alphabeta');
+  else if (choice === '5') state2 = await startNew('ai2', 1, 'kernel');
   else return;
   state = state2; selected = null; hover = null;
   render();

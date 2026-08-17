@@ -11,8 +11,18 @@ from barricade.engine.alphabeta import AlphaBetaEngine
 from barricade.engine.greedy import GreedyEngine
 from barricade.engine.random import RandomEngine
 
+try:
+    from barricade.engine.numba_engine import KernelEngine
+    _HAS_NUMBA = True
+except ImportError:
+    KernelEngine = None
+    _HAS_NUMBA = False
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 ENGINES = {"random": RandomEngine, "greedy": GreedyEngine, "alphabeta": AlphaBetaEngine}
+if _HAS_NUMBA:
+    ENGINES["kernel"] = KernelEngine
+DEFAULT_ENGINE = "kernel" if _HAS_NUMBA else "alphabeta"
 
 
 class App:
@@ -22,7 +32,7 @@ class App:
         self.ai_player = None  # None=pvp, 0/1=vs AI, 'both'=AI vs AI
         self.depth = depth
         self.time_limit = time_limit
-        self.engine = self._make_engine("alphabeta")
+        self.engine = self._make_engine(DEFAULT_ENGINE)
 
     def _with_lock(self, fn):
         with self.lock:
@@ -43,8 +53,8 @@ class App:
         return self._with_lock(_new)
 
     def _make_engine(self, name):
-        cls = ENGINES.get(name, AlphaBetaEngine)
-        if cls is AlphaBetaEngine:
+        cls = ENGINES.get(name, ENGINES[DEFAULT_ENGINE])
+        if cls in (AlphaBetaEngine, KernelEngine):
             return cls(max_depth=self.depth, time_limit=self.time_limit)
         return cls()
 

@@ -1,0 +1,702 @@
+"""Numba-compiled search kernel for Barricade.
+
+A self-contained negamax search (alpha-beta + transposition table, iterative
+deepening) compiled with numba nopython mode.
+
+81-bit masks do not fit in a native 64-bit int, so every 81-bit mask is
+represented as a (hi, lo) pair of uint64 (hi holds bits 64..80).
+
+State is an immutable 15-tuple of int64:
+    (pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo,
+     hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key)
+
+hb/vb are edge masks, hs/vs slot masks; `key` is a Zobrist hash of the
+position, maintained incrementally by apply_move/apply_wall.
+
+Actions are encoded as single ints:
+  * 0..80   -> move to that cell index
+  * 81..208 -> wall: 81 + ori*64 + slot (ori 0 = horizontal, 1 = vertical,
+               slot = r*8 + c with r, c in 0..7)
+
+Time budget is enforced by the Python wrapper (time.time is unavailable in
+nopython mode), which drives iterative deepening one depth at a time through
+`search_depth`; the kernel itself never checks the clock.
+"""
+
+import numpy as np
+from numba import njit
+
+M17 = np.uint64((1 << 17) - 1)  # 17 low bits of the hi word (board bits 64..80)
+M64 = np.uint64((1 << 64) - 1)  # full 64-bit lo word
+U0 = np.uint64(0)
+U1 = np.uint64(1)
+
+# column-0 / column-8 cell masks (used to stop horizontal edge shifts)
+_col0 = sum(1 << (r * 9) for r in range(9))
+COL0_HI, COL0_LO = np.uint64(_col0 >> 64), np.uint64(_col0 & 0xFFFFFFFFFFFFFFFF)
+del _col0
+
+_col8 = sum(1 << (r * 9 + 8) for r in range(9))
+COL8_HI, COL8_LO = np.uint64(_col8 >> 64), np.uint64(_col8 & 0xFFFFFFFFFFFFFFFF)
+del _col8
+
+GOAL0 = (1 << 9) - 1                      # player 0 goal: row 0
+GOAL1 = ((1 << 81) - 1) ^ ((1 << 72) - 1)  # player 1 goal: row 8
+GOAL0_HI, GOAL0_LO = np.uint64(GOAL0 >> 64), np.uint64(GOAL0 & 0xFFFFFFFFFFFFFFFF)
+GOAL1_HI, GOAL1_LO = np.uint64(GOAL1 >> 64), np.uint64(GOAL1 & 0xFFFFFFFFFFFFFFFF)
+
+INF = 1 << 30
+MATE = 100000
+ABORT = 1 << 62
+WALL_BASE = 81
+
+WALL_CAP = 12  # max wall moves generated at an interior node
+ROOT_WALL_CAP = 24
+
+DIST_W = 4
+CONF_W = 0.12
+
+# ---- zobrist layout -------------------------------------------------------
+ZB_POS1 = 81
+ZB_HB = 162
+ZB_VB = 243
+ZB_HS = 324
+ZB_VS = 388
+ZB_WL0 = 452
+ZB_WL1 = 463
+ZB_TURN = 474
+ZB_SIZE = 476
+
+
+# ---- mask pair helpers ----------------------------------------------------
+
+@njit(cache=True, inline='always')
+def bit(hi, lo, i):
+    """Bit `i` (0..80) of an 81-bit mask stored as (hi, lo), as np.int64."""
+    if i < 64:
+        return np.int64((lo >> np.uint64(i)) & U1)
+    return np.int64((hi >> (np.uint64(i) - np.uint64(64))) & U1)
+
+
+@njit(cache=True, inline='always')
+def set_bit(hi, lo, i):
+    """Set bit `i`; returns the new (hi, lo) pair."""
+    if i < 64:
+        return hi, lo | (U1 << np.uint64(i))
+    return hi | (U1 << (np.uint64(i) - np.uint64(64))), lo
+
+
+@njit(cache=True, inline='always')
+def shl(hi, lo, k):
+    """(hi, lo) << k, truncated to the 81-bit board."""
+    ku = np.uint64(k)
+    return ((hi << ku) | (lo >> (np.uint64(64) - ku))) & M17, (lo << ku) & M64
+
+
+@njit(cache=True, inline='always')
+def shr(hi, lo, k):
+    """(hi, lo) >> k."""
+    ku = np.uint64(k)
+    return (hi >> ku), ((lo >> ku) | ((hi & ((U1 << ku) - U1)) << (np.uint64(64) - ku)))
+
+
+# ---- flood fill -----------------------------------------------------------
+
+@njit(cache=True)
+def flood_dist(start, hb_hi, hb_lo, vb_hi, vb_lo, goal_hi, goal_lo):
+    """Shortest-path distance from `start` to any cell of `goal`, or INF."""
+    if bit(goal_hi, goal_lo, start):
+        return 0
+    if start < 64:
+        f_hi, f_lo = U0, U1 << np.uint64(start)
+    else:
+        f_hi, f_lo = U1 << (np.uint64(start) - np.uint64(64)), U0
+    seen_hi, seen_lo = f_hi, f_lo
+    up_hi, up_lo = shl(hb_hi, hb_lo, 9)
+    left_hi, left_lo = shl(vb_hi, vb_lo, 1)
+    d = 0
+    while (f_hi | f_lo) != U0:
+        d += 1
+        nxt_hi, nxt_lo = shr(f_hi & ~up_hi, f_lo & ~up_lo, 9)
+        t_hi, t_lo = shl(f_hi & ~hb_hi, f_lo & ~hb_lo, 9)
+        nxt_hi |= t_hi
+        nxt_lo |= t_lo
+        t_hi, t_lo = shr(f_hi & ~left_hi & ~COL0_HI, f_lo & ~left_lo & ~COL0_LO, 1)
+        nxt_hi |= t_hi
+        nxt_lo |= t_lo
+        t_hi, t_lo = shl(f_hi & ~vb_hi & ~COL8_HI, f_lo & ~vb_lo & ~COL8_LO, 1)
+        nxt_hi |= t_hi
+        nxt_lo |= t_lo
+        nxt_hi &= M17 & ~seen_hi
+        nxt_lo &= M64 & ~seen_lo
+        if ((nxt_hi & goal_hi) | (nxt_lo & goal_lo)) != U0:
+            return d
+        seen_hi |= nxt_hi
+        seen_lo |= nxt_lo
+        f_hi, f_lo = nxt_hi, nxt_lo
+    return INF
+
+
+@njit(cache=True)
+def flood_dists(start, hb_hi, hb_lo, vb_hi, vb_lo, dist):
+    """Fill `dist` (int64[81]) with BFS distances from `start` (-1 unreachable)."""
+    for i in range(81):
+        dist[i] = -1
+    dist[start] = 0
+    q = np.zeros(81, np.int64)
+    q[0] = start
+    head = 0
+    tail = 1
+    while head < tail:
+        cur = q[head]
+        head += 1
+        r = cur // 9
+        c = cur - r * 9
+        if r > 0 and bit(hb_hi, hb_lo, cur - 9) == 0 and dist[cur - 9] < 0:
+            dist[cur - 9] = dist[cur] + 1
+            q[tail] = cur - 9
+            tail += 1
+        if r < 8 and bit(hb_hi, hb_lo, cur) == 0 and dist[cur + 9] < 0:
+            dist[cur + 9] = dist[cur] + 1
+            q[tail] = cur + 9
+            tail += 1
+        if c > 0 and bit(vb_hi, vb_lo, cur - 1) == 0 and dist[cur - 1] < 0:
+            dist[cur - 1] = dist[cur] + 1
+            q[tail] = cur - 1
+            tail += 1
+        if c < 8 and bit(vb_hi, vb_lo, cur) == 0 and dist[cur + 1] < 0:
+            dist[cur + 1] = dist[cur] + 1
+            q[tail] = cur + 1
+            tail += 1
+
+
+# ---- move generation ------------------------------------------------------
+
+@njit(cache=True, inline='always')
+def edge_free(a, b, hb_hi, hb_lo, vb_hi, vb_lo):
+    """True if the edge between adjacent cells `a` and `b` is open.
+
+    An edge is indexed by the cell nearer the origin: the upper cell for
+    vertical edges (hb), the left cell for horizontal edges (vb).
+    """
+    if a - b == 9:
+        return bit(hb_hi, hb_lo, b) == 0
+    if b - a == 9:
+        return bit(hb_hi, hb_lo, a) == 0
+    if a - b == 1:
+        return bit(vb_hi, vb_lo, b) == 0
+    if b - a == 1:
+        return bit(vb_hi, vb_lo, a) == 0
+    return False
+
+
+@njit(cache=True, inline='always')
+def push_move(out, n, t):
+    out[n] = t
+    return n + 1
+
+
+@njit(cache=True, inline='always')
+def try_jump(pos, t, hb_hi, hb_lo, vb_hi, vb_lo, out, n):
+    """`t` is the opponent cell: try the straight jump, then the diagonals."""
+    pr = pos // 9
+    pc = pos - pr * 9
+    tr = t // 9
+    tc = t - tr * 9
+    dr = tr - pr
+    dc = tc - pc
+    sr = tr + dr
+    sc = tc + dc
+    if 0 <= sr < 9 and 0 <= sc < 9 and edge_free(t, sr * 9 + sc, hb_hi, hb_lo, vb_hi, vb_lo):
+        return push_move(out, n, sr * 9 + sc)
+    for ddr, ddc in ((dc, dr), (-dc, -dr)):
+        nr = tr + ddr
+        nc = tc + ddc
+        if 0 <= nr < 9 and 0 <= nc < 9 and edge_free(t, nr * 9 + nc, hb_hi, hb_lo, vb_hi, vb_lo):
+            n = push_move(out, n, nr * 9 + nc)
+    return n
+
+
+@njit(cache=True)
+def gen_moves(pos, opp, hb_hi, hb_lo, vb_hi, vb_lo, out):
+    """Write legal move targets for the pawn at `pos` into `out`; returns count."""
+    n = 0
+    r = pos // 9
+    c = pos - r * 9
+    if r > 0 and bit(hb_hi, hb_lo, pos - 9) == 0:
+        t = pos - 9
+        if t == opp:
+            n = try_jump(pos, t, hb_hi, hb_lo, vb_hi, vb_lo, out, n)
+        else:
+            n = push_move(out, n, t)
+    if r < 8 and bit(hb_hi, hb_lo, pos) == 0:
+        t = pos + 9
+        if t == opp:
+            n = try_jump(pos, t, hb_hi, hb_lo, vb_hi, vb_lo, out, n)
+        else:
+            n = push_move(out, n, t)
+    if c > 0 and bit(vb_hi, vb_lo, pos - 1) == 0:
+        t = pos - 1
+        if t == opp:
+            n = try_jump(pos, t, hb_hi, hb_lo, vb_hi, vb_lo, out, n)
+        else:
+            n = push_move(out, n, t)
+    if c < 8 and bit(vb_hi, vb_lo, pos) == 0:
+        t = pos + 1
+        if t == opp:
+            n = try_jump(pos, t, hb_hi, hb_lo, vb_hi, vb_lo, out, n)
+        else:
+            n = push_move(out, n, t)
+    return n
+
+
+# ---- wall generation ------------------------------------------------------
+
+@njit(cache=True, inline='always')
+def wall_ok(st, ori, r, c):
+    """Mechanical check + both pawns still reach their goals with wall (ori, r, c)."""
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    slot = r * 8 + c
+    if bit(hs_hi, hs_lo, slot) or bit(vs_hi, vs_lo, slot):
+        return False
+    if ori == 0:
+        e1 = r * 9 + c
+        e2 = r * 9 + c + 1
+        if bit(hb_hi, hb_lo, e1) or bit(hb_hi, hb_lo, e2):
+            return False
+        hb_hi, hb_lo = set_bit(hb_hi, hb_lo, e1)
+        hb_hi, hb_lo = set_bit(hb_hi, hb_lo, e2)
+        hs_hi, hs_lo = set_bit(hs_hi, hs_lo, slot)
+    else:
+        e1 = r * 9 + c
+        e2 = (r + 1) * 9 + c
+        if bit(vb_hi, vb_lo, e1) or bit(vb_hi, vb_lo, e2):
+            return False
+        vb_hi, vb_lo = set_bit(vb_hi, vb_lo, e1)
+        vb_hi, vb_lo = set_bit(vb_hi, vb_lo, e2)
+        vs_hi, vs_lo = set_bit(vs_hi, vs_lo, slot)
+    if flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO) >= INF:
+        return False
+    if flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO) >= INF:
+        return False
+    return True
+
+
+@njit
+def gen_walls(st, my, opp, out, cap):
+    """Candidate legal walls near the opponent's path, capped; returns count."""
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    buf = np.zeros(81, np.int64)
+    flood_dists(opp, hb_hi, hb_lo, vb_hi, vb_lo, buf)
+
+    # cell with minimal distance to the opponent's goal, then walk back
+    best = -1
+    bd = INF
+    if opp == pos0:
+        for i in range(9):
+            if buf[i] >= 0 and buf[i] < bd:
+                bd = buf[i]
+                best = i
+    else:
+        for i in range(72, 81):
+            if buf[i] >= 0 and buf[i] < bd:
+                bd = buf[i]
+                best = i
+    if best < 0:
+        return 0
+    path = np.zeros(64, np.int64)
+    np_ = 0
+    cur = best
+    path[np_] = cur
+    np_ += 1
+    while buf[cur] > 0:
+        d = buf[cur] - 1
+        r = cur // 9
+        c = cur - r * 9
+        found = -1
+        if r > 0 and buf[cur - 9] == d:
+            found = cur - 9
+        elif r < 8 and buf[cur + 9] == d:
+            found = cur + 9
+        elif c > 0 and buf[cur - 1] == d:
+            found = cur - 1
+        elif c < 8 and buf[cur + 1] == d:
+            found = cur + 1
+        if found < 0:
+            break
+        path[np_] = found
+        np_ += 1
+        cur = found
+
+    # candidate slots: corners of every path cell + window around our pawn
+    seen = np.full(64, -1, np.int64)
+    cands = np.zeros(64, np.int64)
+    nsl = 0
+    for i in range(np_):
+        r = path[i] // 9
+        c = path[i] - r * 9
+        for rr in (r - 1, r):
+            for cc in (c - 1, c):
+                if 0 <= rr < 8 and 0 <= cc < 8:
+                    s = rr * 8 + cc
+                    if seen[s] < 0:
+                        seen[s] = 1
+                        cands[nsl] = s
+                        nsl += 1
+    pr = my // 9
+    pc = my - pr * 9
+    for rr in range(max(0, pr - 1), min(8, pr + 2)):
+        for cc in range(max(0, pc - 1), min(8, pc + 2)):
+            s = rr * 8 + cc
+            if seen[s] < 0:
+                seen[s] = 1
+                cands[nsl] = s
+                nsl += 1
+
+    # order by Manhattan distance to the opponent pawn
+    or_ = np.zeros(64, np.int64)
+    keys = np.zeros(64, np.int64)
+    or_[0] = cands[0]
+    keys[0] = 0
+    for i in range(1, nsl):
+        s = cands[i]
+        r = s // 8
+        c = s % 8
+        kv = abs(r - opp // 9) + abs(c - (opp - opp // 9 * 9))
+        j = i - 1
+        while j >= 0 and keys[j] > kv:
+            keys[j + 1] = keys[j]
+            or_[j + 1] = or_[j]
+            j -= 1
+        keys[j + 1] = kv
+        or_[j + 1] = s
+
+    nw = 0
+    for i in range(nsl):
+        if nw >= cap:
+            break
+        s = or_[i]
+        r = s // 8
+        c = s % 8
+        if wall_ok(st, 0, r, c):
+            out[nw] = WALL_BASE + s
+            nw += 1
+        if nw >= cap:
+            break
+        if wall_ok(st, 1, r, c):
+            out[nw] = WALL_BASE + 64 + s
+            nw += 1
+    return nw
+
+
+# ---- evaluation -----------------------------------------------------------
+
+@njit(cache=True, inline='always')
+def eval_fn(st):
+    """Static score from the perspective of the side to move."""
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    d0 = flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO)
+    d1 = flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO)
+    if turn == 0:
+        my_d, opp_d, my_w, opp_w = d0, d1, wl0, wl1
+    else:
+        my_d, opp_d, my_w, opp_w = d1, d0, wl1, wl0
+    dist_adv = (opp_d - my_d) * DIST_W
+    if dist_adv > 0:
+        conf = max(1.0 - CONF_W * opp_w, 0.05)
+        dist_adv = np.int64(dist_adv * conf)
+    return dist_adv + (my_w - opp_w)
+
+
+# ---- state transitions ----------------------------------------------------
+
+@njit
+def apply_move(st, t, zob):
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    if turn == 0:
+        key ^= zob[pos0] ^ zob[t]
+        pos0 = t
+    else:
+        key ^= zob[ZB_POS1 + pos1] ^ zob[ZB_POS1 + t]
+        pos1 = t
+    turn = 1 - turn
+    key ^= zob[ZB_TURN]
+    plies += 1
+    return (pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo,
+            hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key)
+
+
+@njit
+def apply_wall(st, action, zob):
+    w = action - WALL_BASE
+    ori = w // 64
+    slot = w % 64
+    r = slot // 8
+    c = slot % 8
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    if ori == 0:
+        e1 = r * 9 + c
+        e2 = r * 9 + c + 1
+        hb_hi, hb_lo = set_bit(hb_hi, hb_lo, e1)
+        hb_hi, hb_lo = set_bit(hb_hi, hb_lo, e2)
+        hs_hi, hs_lo = set_bit(hs_hi, hs_lo, slot)
+        key ^= zob[ZB_HB + e1] ^ zob[ZB_HB + e2] ^ zob[ZB_HS + slot]
+    else:
+        e1 = r * 9 + c
+        e2 = (r + 1) * 9 + c
+        vb_hi, vb_lo = set_bit(vb_hi, vb_lo, e1)
+        vb_hi, vb_lo = set_bit(vb_hi, vb_lo, e2)
+        vs_hi, vs_lo = set_bit(vs_hi, vs_lo, slot)
+        key ^= zob[ZB_VB + e1] ^ zob[ZB_VB + e2] ^ zob[ZB_VS + slot]
+    if turn == 0:
+        key ^= zob[ZB_WL0 + wl0]
+        wl0 -= 1
+        key ^= zob[ZB_WL0 + wl0]
+    else:
+        key ^= zob[ZB_WL1 + wl1]
+        wl1 -= 1
+        key ^= zob[ZB_WL1 + wl1]
+    turn = 1 - turn
+    key ^= zob[ZB_TURN]
+    plies += 1
+    return (pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo,
+            hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key)
+
+
+# ---- search ---------------------------------------------------------------
+
+@njit
+def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, zob, budget):
+    budget[0] -= 1
+    if budget[0] < 0:
+        return ABORT
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    # a terminal state means the side to move has just lost (the previous
+    # mover reached its goal row), so the value is always a loss: plies - MATE.
+    if pos0 < 9 or pos1 >= 72:
+        return plies - MATE
+    if depth <= 0:
+        return eval_fn(st)
+
+    k2 = key & (tt_k.shape[0] - 1)
+    if tt_k[k2] == key and tt_d[k2] >= depth:
+        if tt_f[k2] == 0:
+            return tt_v[k2]
+        if tt_f[k2] == 1 and tt_v[k2] >= beta:
+            return tt_v[k2]
+        if tt_f[k2] == 2 and tt_v[k2] <= alpha:
+            return tt_v[k2]
+
+    my = pos0 if turn == 0 else pos1
+    opp = pos1 if turn == 0 else pos0
+    original_alpha = alpha
+    best = -MATE - 1
+    fail_high = False
+
+    moves = np.zeros(16, np.int64)
+    nm = gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
+    buf = np.zeros(81, np.int64)
+    flood_dists(my, hb_hi, hb_lo, vb_hi, vb_lo, buf)
+    for i in range(1, nm):
+        mv = moves[i]
+        kv = buf[mv]
+        j = i - 1
+        while j >= 0 and buf[moves[j]] > kv:
+            moves[j + 1] = moves[j]
+            j -= 1
+        moves[j + 1] = mv
+
+    for i in range(nm):
+        raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha,
+                      tt_k, tt_v, tt_d, tt_f, zob, budget)
+        if raw == ABORT:
+            return ABORT
+        s = -raw
+        if s >= beta:
+            best = s
+            fail_high = True
+            break
+        if s > best:
+            best = s
+        if s > alpha:
+            alpha = s
+
+    if not fail_high:
+        wl = wl0 if turn == 0 else wl1
+        if wl > 0:
+            walls = np.zeros(32, np.int64)
+            nw = gen_walls(st, my, opp, walls, WALL_CAP)
+            for i in range(nw):
+                raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha,
+                              tt_k, tt_v, tt_d, tt_f, zob, budget)
+                if raw == ABORT:
+                    return ABORT
+                s = -raw
+                if s >= beta:
+                    best = s
+                    fail_high = True
+                    break
+                if s > best:
+                    best = s
+                if s > alpha:
+                    alpha = s
+
+    if abs(best) < MATE - 1000:
+        tt_k[k2] = key
+        tt_d[k2] = depth
+        tt_v[k2] = best
+        if fail_high:
+            tt_f[k2] = 1
+        elif best > original_alpha:
+            tt_f[k2] = 0
+        else:
+            tt_f[k2] = 2
+    return best
+
+
+@njit
+def search_depth(st, depth, hint, tt_k, tt_v, tt_d, tt_f, zob, budget):
+    """One iterative-deepening level at the root. Returns (action, score, aborted)."""
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    my = pos0 if turn == 0 else pos1
+    opp = pos1 if turn == 0 else pos0
+    alpha = -MATE - 1
+    beta = MATE + 1
+    best_action = -1
+    best_score = -MATE - 1
+
+    moves = np.zeros(16, np.int64)
+    nm = gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
+    buf = np.zeros(81, np.int64)
+    flood_dists(my, hb_hi, hb_lo, vb_hi, vb_lo, buf)
+    for i in range(1, nm):
+        mv = moves[i]
+        kv = buf[mv]
+        j = i - 1
+        while j >= 0 and buf[moves[j]] > kv:
+            moves[j + 1] = moves[j]
+            j -= 1
+        moves[j + 1] = mv
+    if hint >= 0 and hint < 81:
+        for i in range(nm):
+            if moves[i] == hint:
+                for j in range(i, 0, -1):
+                    moves[j] = moves[j - 1]
+                moves[0] = hint
+                break
+
+    for i in range(nm):
+        raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha,
+                      tt_k, tt_v, tt_d, tt_f, zob, budget)
+        if raw == ABORT:
+            return (best_action, best_score, True)
+        s = -raw
+        if s > best_score:
+            best_score = s
+            best_action = moves[i]
+        if s > alpha:
+            alpha = s
+
+    wl = wl0 if turn == 0 else wl1
+    if wl > 0:
+        walls = np.zeros(32, np.int64)
+        nw = gen_walls(st, my, opp, walls, ROOT_WALL_CAP)
+        hint_w = -1
+        if hint >= 81:
+            for i in range(nw):
+                if walls[i] == hint:
+                    hint_w = i
+                    break
+        if hint_w >= 0:
+            h = walls[hint_w]
+            for j in range(hint_w, 0, -1):
+                walls[j] = walls[j - 1]
+            walls[0] = h
+        for i in range(nw):
+            raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha,
+                          tt_k, tt_v, tt_d, tt_f, zob, budget)
+            if raw == ABORT:
+                return (best_action, best_score, True)
+            s = -raw
+            if s > best_score:
+                best_score = s
+                best_action = walls[i]
+            if s > alpha:
+                alpha = s
+
+    return (best_action, best_score, False)
+
+
+# ---- Python-facing helpers ------------------------------------------------
+
+def make_state(game, zob):
+    """Build the kernel state tuple and its Zobrist key from a Game."""
+    from barricade.engine.bitboard import build_masks
+
+    p0r, p0c = game.positions[0]
+    p1r, p1c = game.positions[1]
+    pos0 = p0r * 9 + p0c
+    pos1 = p1r * 9 + p1c
+    hb, vb, hs, vs = build_masks(game.h_walls, game.v_walls)
+    hb_hi = np.uint64(hb >> 64)
+    hb_lo = np.uint64(hb & 0xFFFFFFFFFFFFFFFF)
+    vb_hi = np.uint64(vb >> 64)
+    vb_lo = np.uint64(vb & 0xFFFFFFFFFFFFFFFF)
+    hs_hi = np.uint64(hs >> 64)
+    hs_lo = np.uint64(hs & 0xFFFFFFFFFFFFFFFF)
+    vs_hi = np.uint64(vs >> 64)
+    vs_lo = np.uint64(vs & 0xFFFFFFFFFFFFFFFF)
+    turn = game.turn
+    plies = len(game.history)
+
+    key = int(zob[pos0]) ^ int(zob[ZB_POS1 + pos1])
+    key ^= int(zob[ZB_WL0 + game.walls_left[0]]) ^ int(zob[ZB_WL1 + game.walls_left[1]])
+    if turn == 1:
+        key ^= int(zob[ZB_TURN])
+    for m in (hb, vb):
+        x = m
+        while x:
+            b = x & -x
+            i = b.bit_length() - 1
+            off = ZB_HB if m is hb else ZB_VB
+            key ^= int(zob[off + i])
+            x &= x - 1
+    for m in (hs, vs):
+        x = m
+        while x:
+            b = x & -x
+            i = b.bit_length() - 1
+            off = ZB_HS if m is hs else ZB_VS
+            key ^= int(zob[off + i])
+            x &= x - 1
+    return (np.int64(pos0), np.int64(pos1), np.int64(game.walls_left[0]),
+            np.int64(game.walls_left[1]), hb_hi, hb_lo, vb_hi, vb_lo,
+            hs_hi, hs_lo, vs_hi, vs_lo, np.int64(turn), np.int64(plies),
+            np.int64(key))
+
+
+def make_zobrist(seed=42):
+    rng = np.random.default_rng(seed)
+    return rng.integers(-(1 << 62), 1 << 62, size=ZB_SIZE, dtype=np.int64)
+
+
+def decode_action(action):
+    """Kernel action int -> game action tuple."""
+    if action < 81:
+        r, c = divmod(action, 9)
+        return ("move", (r, c))
+    w = action - WALL_BASE
+    ori, slot = divmod(w, 64)
+    r, c = divmod(slot, 8)
+    return ("wall", ("H" if ori == 0 else "V", r, c))
+
+
+def encode_action(game, action):
+    """game action tuple -> kernel action int (assumes the action is legal)."""
+    kind, value = action
+    if kind == "move":
+        r, c = value
+        return r * 9 + c
+    ori, r, c = value
+    slot = r * 8 + c
+    return WALL_BASE + (0 if ori == "H" else 64) + slot

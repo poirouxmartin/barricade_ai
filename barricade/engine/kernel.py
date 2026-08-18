@@ -466,7 +466,7 @@ def apply_wall(st, action, zob):
 # ---- search ---------------------------------------------------------------
 
 @njit
-def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, zob, budget):
+def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget):
     budget[0] -= 1
     if budget[0] < 0:
         return ABORT
@@ -479,18 +479,22 @@ def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, zob, budget):
         return eval_fn(st)
 
     k2 = key & (tt_k.shape[0] - 1)
-    if tt_k[k2] == key and tt_d[k2] >= depth:
-        if tt_f[k2] == 0:
-            return tt_v[k2]
-        if tt_f[k2] == 1 and tt_v[k2] >= beta:
-            return tt_v[k2]
-        if tt_f[k2] == 2 and tt_v[k2] <= alpha:
-            return tt_v[k2]
+    hint = -1
+    if tt_k[k2] == key:
+        hint = tt_m[k2]
+        if tt_d[k2] >= depth:
+            if tt_f[k2] == 0:
+                return tt_v[k2]
+            if tt_f[k2] == 1 and tt_v[k2] >= beta:
+                return tt_v[k2]
+            if tt_f[k2] == 2 and tt_v[k2] <= alpha:
+                return tt_v[k2]
 
     my = pos0 if turn == 0 else pos1
     opp = pos1 if turn == 0 else pos0
     original_alpha = alpha
     best = -MATE - 1
+    best_action = -1
     fail_high = False
 
     moves = np.zeros(16, np.int64)
@@ -505,19 +509,37 @@ def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, zob, budget):
             moves[j + 1] = moves[j]
             j -= 1
         moves[j + 1] = mv
+    if 0 <= hint < 81:
+        for i in range(nm):
+            if moves[i] == hint:
+                for j in range(i, 0, -1):
+                    moves[j] = moves[j - 1]
+                moves[0] = hint
+                break
 
     for i in range(nm):
-        raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha,
-                      tt_k, tt_v, tt_d, tt_f, zob, budget)
+        red = 0
+        if depth >= 4 and i >= 2:
+            red = 1
+        raw = negamax(apply_move(st, moves[i], zob), depth - 1 - red, -beta, -alpha,
+                      tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget)
         if raw == ABORT:
             return ABORT
         s = -raw
+        if red > 0 and s > alpha and s < beta:
+            raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha,
+                          tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget)
+            if raw == ABORT:
+                return ABORT
+            s = -raw
         if s >= beta:
             best = s
             fail_high = True
+            best_action = moves[i]
             break
         if s > best:
             best = s
+            best_action = moves[i]
         if s > alpha:
             alpha = s
 
@@ -526,18 +548,38 @@ def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, zob, budget):
         if wl > 0:
             walls = np.zeros(32, np.int64)
             nw = gen_walls(st, my, opp, walls, WALL_CAP)
+            if hint >= WALL_BASE:
+                for i in range(nw):
+                    if walls[i] == hint:
+                        for j in range(i, 0, -1):
+                            walls[j] = walls[j - 1]
+                        walls[0] = hint
+                        break
             for i in range(nw):
-                raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha,
-                              tt_k, tt_v, tt_d, tt_f, zob, budget)
+                red = 0
+                if depth >= 4 and i >= 2:
+                    red = 1
+                if depth >= 6 and i >= 4:
+                    red = 2
+                raw = negamax(apply_wall(st, walls[i], zob), depth - 1 - red, -beta, -alpha,
+                              tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget)
                 if raw == ABORT:
                     return ABORT
                 s = -raw
+                if red > 0 and s > alpha and s < beta:
+                    raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha,
+                                  tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget)
+                    if raw == ABORT:
+                        return ABORT
+                    s = -raw
                 if s >= beta:
                     best = s
                     fail_high = True
+                    best_action = walls[i]
                     break
                 if s > best:
                     best = s
+                    best_action = walls[i]
                 if s > alpha:
                     alpha = s
 
@@ -545,6 +587,7 @@ def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, zob, budget):
         tt_k[k2] = key
         tt_d[k2] = depth
         tt_v[k2] = best
+        tt_m[k2] = best_action
         if fail_high:
             tt_f[k2] = 1
         elif best > original_alpha:
@@ -555,15 +598,42 @@ def negamax(st, depth, alpha, beta, tt_k, tt_v, tt_d, tt_f, zob, budget):
 
 
 @njit
-def search_depth(st, depth, hint, tt_k, tt_v, tt_d, tt_f, zob, budget):
+def _root_search(st, depth, alpha, beta, moves, nm, walls, nw,
+                 tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget):
+    """Root move loop for one depth level; returns (action, score, aborted)."""
+    best_action = -1
+    best_score = -MATE - 1
+    for i in range(nm):
+        raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha,
+                      tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget)
+        if raw == ABORT:
+            return (best_action, best_score, True)
+        s = -raw
+        if s > best_score:
+            best_score = s
+            best_action = moves[i]
+        if s > alpha:
+            alpha = s
+    for i in range(nw):
+        raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha,
+                      tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget)
+        if raw == ABORT:
+            return (best_action, best_score, True)
+        s = -raw
+        if s > best_score:
+            best_score = s
+            best_action = walls[i]
+        if s > alpha:
+            alpha = s
+    return (best_action, best_score, False)
+
+
+@njit
+def search_depth(st, depth, hint, prev_score, tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget):
     """One iterative-deepening level at the root. Returns (action, score, aborted)."""
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     my = pos0 if turn == 0 else pos1
     opp = pos1 if turn == 0 else pos0
-    alpha = -MATE - 1
-    beta = MATE + 1
-    best_action = -1
-    best_score = -MATE - 1
 
     moves = np.zeros(16, np.int64)
     nm = gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
@@ -585,46 +655,33 @@ def search_depth(st, depth, hint, tt_k, tt_v, tt_d, tt_f, zob, budget):
                 moves[0] = hint
                 break
 
-    for i in range(nm):
-        raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha,
-                      tt_k, tt_v, tt_d, tt_f, zob, budget)
-        if raw == ABORT:
-            return (best_action, best_score, True)
-        s = -raw
-        if s > best_score:
-            best_score = s
-            best_action = moves[i]
-        if s > alpha:
-            alpha = s
-
     wl = wl0 if turn == 0 else wl1
+    walls = np.zeros(32, np.int64)
+    nw = 0
     if wl > 0:
-        walls = np.zeros(32, np.int64)
         nw = gen_walls(st, my, opp, walls, ROOT_WALL_CAP)
-        hint_w = -1
-        if hint >= 81:
+        if hint >= WALL_BASE:
             for i in range(nw):
                 if walls[i] == hint:
-                    hint_w = i
+                    for j in range(i, 0, -1):
+                        walls[j] = walls[j - 1]
+                    walls[0] = hint
                     break
-        if hint_w >= 0:
-            h = walls[hint_w]
-            for j in range(hint_w, 0, -1):
-                walls[j] = walls[j - 1]
-            walls[0] = h
-        for i in range(nw):
-            raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha,
-                          tt_k, tt_v, tt_d, tt_f, zob, budget)
-            if raw == ABORT:
-                return (best_action, best_score, True)
-            s = -raw
-            if s > best_score:
-                best_score = s
-                best_action = walls[i]
-            if s > alpha:
-                alpha = s
 
-    return (best_action, best_score, False)
+    if depth >= 3:
+        margin = 16 + depth * 2
+        alpha = prev_score - margin
+        beta = prev_score + margin
+    else:
+        alpha = -MATE - 1
+        beta = MATE + 1
+    action, score, aborted = _root_search(st, depth, alpha, beta, moves, nm, walls, nw,
+                                          tt_k, tt_v, tt_d, tt_f, tt_m, zob, budget)
+    if not aborted and action >= 0 and (score <= alpha or score >= beta):
+        action, score, aborted = _root_search(st, depth, -MATE - 1, MATE + 1, moves, nm,
+                                              walls, nw, tt_k, tt_v, tt_d, tt_f, tt_m,
+                                              zob, budget)
+    return (action, score, aborted)
 
 
 # ---- Python-facing helpers ------------------------------------------------

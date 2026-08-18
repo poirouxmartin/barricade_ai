@@ -33,6 +33,7 @@ class KernelEngine(Engine):
         self.tt_v = np.zeros(tt_size, np.int64)
         self.tt_d = np.zeros(tt_size, np.int64)
         self.tt_f = np.zeros(tt_size, np.int64)
+        self.tt_m = np.zeros(tt_size, np.int64)
         self.budget = np.zeros(1, np.int64)
         self.last_info = {}
         self._warm = False
@@ -44,8 +45,8 @@ class KernelEngine(Engine):
         self._warm = True
         from barricade.game import Barricade
         st = kernel.make_state(Barricade(), self.zob)
-        kernel.search_depth(st, 2, -1, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
-                            self.zob, self.budget)
+        kernel.search_depth(st, 2, -1, 0, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
+                            self.tt_m, self.zob, self.budget)
 
     def choose_move(self, game):
         self._warmup()
@@ -53,10 +54,12 @@ class KernelEngine(Engine):
         self.tt_v[:] = 0
         self.tt_d[:] = 0
         self.tt_f[:] = 0
+        self.tt_m[:] = 0
         st = kernel.make_state(game, self.zob)
         deadline = time.time() + self.time_limit
         best = random.choice(game.legal_actions())
         hint = -1
+        prev_score = 0
         total_nodes = 0
         for depth in range(1, self.max_depth + 1):
             remaining = deadline - time.time()
@@ -66,8 +69,8 @@ class KernelEngine(Engine):
             self.budget[0] = allowance
             t0 = time.time()
             action, score, aborted = kernel.search_depth(
-                st, depth, hint, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
-                self.zob, self.budget)
+                st, depth, hint, prev_score, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
+                self.tt_m, self.zob, self.budget)
             dt = max(time.time() - t0, 1e-6)
             used = max(0, allowance - int(self.budget[0]))
             total_nodes += used
@@ -80,6 +83,7 @@ class KernelEngine(Engine):
             if action >= 0:
                 best = kernel.decode_action(action)
                 hint = action
+                prev_score = int(score)
             self.last_info = {"depth": depth, "nodes": total_nodes,
                               "score": int(score)}
         return best

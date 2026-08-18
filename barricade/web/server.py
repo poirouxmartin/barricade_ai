@@ -39,6 +39,9 @@ class App:
         self.lock = RLock()
         self.game = Barricade()
         self.ai_player = None  # None=pvp, 0/1=vs AI, 'both'=AI vs AI
+        self.mode = "pvp"
+        self.engine_name = None
+        self.engine_info = None
         self.depth = depth
         self.time_limit = time_limit
         self.engine = self._make_engine(DEFAULT_ENGINE)
@@ -47,17 +50,25 @@ class App:
         with self.lock:
             return fn()
 
+    def meta(self):
+        return {"engines": sorted(ENGINES), "default": DEFAULT_ENGINE}
+
     def new(self, mode, ai_player=1, engine="alphabeta", time_control=None):
         def _new():
             self.game = Barricade(time_control=time_control)
+            self.mode = mode
+            self.engine_info = None
             if mode == "ai":
                 self.ai_player = ai_player if ai_player in (0, 1) else 1
                 self.engine = self._make_engine(engine)
+                self.engine_name = engine
             elif mode == "ai2":
                 self.ai_player = "both"
                 self.engine = self._make_engine(engine)
+                self.engine_name = engine
             else:
                 self.ai_player = None
+                self.engine_name = None
             return self.state()
         return self._with_lock(_new)
 
@@ -84,6 +95,9 @@ class App:
         def _state():
             d = self.game.to_dict()
             d["ai_player"] = self.ai_player
+            d["mode"] = self.mode
+            d["engine"] = self.engine_name
+            d["engine_info"] = self.engine_info
             return d
         return self._with_lock(_state)
 
@@ -111,6 +125,8 @@ class App:
                 return None, "not AI turn"
             self._set_engine_time(self.game.turn)
             self.game.apply(self.engine.choose_move(self.game))
+            info = getattr(self.engine, "last_info", None)
+            self.engine_info = {"engine": self.engine_name, "info": info}
             return self.state(), None
         return self._with_lock(_ai)
 
@@ -153,6 +169,8 @@ class Handler(BaseHTTPRequestHandler):
             self._file("main.js", "text/javascript; charset=utf-8")
         elif path == "/api/state":
             self._json(Handler.app.state())
+        elif path == "/api/meta":
+            self._json(Handler.app.meta())
         else:
             self._json({"error": "not found"}, 404)
 

@@ -2,23 +2,72 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Barricade</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="app">
-  <h1>Barricade</h1>
   <div id="topbar">
-    <div id="p0" class="player"><span class="dot" style="background:#d64541"></span>P1 <span id="c0" class="clock"></span><span id="w0" class="wcount"></span></div>
+    <div class="player" id="p0">
+      <span class="dot"></span><span class="pname">P1</span>
+      <span class="wcount" id="w0"></span><span class="clock" id="c0"></span>
+    </div>
     <div id="status">Loading...</div>
-    <div id="p1" class="player"><span class="dot" style="background:#4169e1"></span>P2 <span id="w1" class="wcount"></span><span id="c1" class="clock"></span></div>
+    <div class="player" id="p1">
+      <span class="clock" id="c1"></span><span class="wcount" id="w1"></span><span class="pname">P2</span>
+    </div>
   </div>
   <canvas id="board" width="648" height="648"></canvas>
   <div id="controls">
     <button id="btn-new">New game</button>
+    <button id="btn-flip" title="Rotate the board">Rotate</button>
+    <label class="switch" title="Show what the AI sees">
+      <input type="checkbox" id="chk-debug"> Debug
+    </label>
   </div>
+  <pre id="debug" class="hidden"></pre>
   <p id="hint"></p>
 </div>
+
+<div id="menu" class="hidden">
+  <div class="modal">
+    <h2>New game</h2>
+    <div class="field">
+      <label for="m-mode">Mode</label>
+      <select id="m-mode">
+        <option value="pvp">Player vs Player</option>
+        <option value="ai">vs AI</option>
+        <option value="ai2">AI vs AI</option>
+      </select>
+    </div>
+    <div class="field" id="m-engine-f">
+      <label for="m-engine">Engine</label>
+      <select id="m-engine"></select>
+    </div>
+    <div class="field" id="m-side-f">
+      <label for="m-side">You play</label>
+      <select id="m-side">
+        <option value="1">P1</option>
+        <option value="0">P2</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="m-time">Time per player (s, 0 = none)</label>
+      <input id="m-time" type="number" min="0" step="1" value="0">
+    </div>
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" id="m-flip"> Rotate board (P1 on top)
+      </label>
+    </div>
+    <div class="modal-btns">
+      <button id="m-cancel">Cancel</button>
+      <button id="m-start" class="primary">Start</button>
+    </div>
+  </div>
+</div>
+
 <script src="main.js"></script>
 </body>
 </html>

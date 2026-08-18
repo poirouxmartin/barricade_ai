@@ -1,5 +1,6 @@
 const N = 9, CELL = 72, SIZE = N * CELL;
-const COLORS = ['#d64541', '#4169e1'];
+const COLORS = ['#e76f51', '#4d7cfe'];
+const COLORS_DARK = ['#c0563d', '#3457c9'];
 const NAMES = ['P1', 'P2'];
 const AI_DELAY = 400; // ms pause so the last move is visible before the AI replies
 
@@ -7,15 +8,20 @@ const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const hintEl = document.getElementById('hint');
+const debugEl = document.getElementById('debug');
 const clockEls = [document.getElementById('c0'), document.getElementById('c1')];
 
 let state = null;
 let display = [[8, 4], [0, 4]]; // animated pawn positions
 let selected = null;            // key of selected own pawn
 let hoverWall = null;           // {ori,r,c,d} or null
+let hoverCell = null;           // [r,c] under the cursor
+let flip = false;
+let debugOn = false;
 let aiBusy = false;
 let pendingAiAt = null;         // timestamp to fire the delayed AI move
 let clockAnchorAt = 0;          // performance.now() when current state was received
+let engines = {};
 
 const key = p => p[0] + ',' + p[1];
 
@@ -41,8 +47,10 @@ function isAiTurn() {
 
 function mousePos(e) {
   const rect = canvas.getBoundingClientRect();
-  return [(e.clientX - rect.left) * SIZE / rect.width,
-          (e.clientY - rect.top) * SIZE / rect.height];
+  let mx = (e.clientX - rect.left) * SIZE / rect.width;
+  let my = (e.clientY - rect.top) * SIZE / rect.height;
+  if (flip) { mx = SIZE - mx; my = SIZE - my; }
+  return [mx, my];
 }
 
 function cellAt(mx, my) {
@@ -68,19 +76,23 @@ function adopt(s) {
   state = s;
   selected = null;
   clockAnchorAt = performance.now();
+  updateDebug();
   if (isAiTurn()) pendingAiAt = performance.now() + AI_DELAY;
 }
 
 // ----- interaction -----
 
 canvas.addEventListener('mousemove', e => {
+  hoverWall = null;
+  hoverCell = null;
   if (!state || !isHumanTurn()) return;
   const [mx, my] = mousePos(e);
   const w = wallFromMouse(mx, my);
   hoverWall = (w && w.d <= 14) ? w : null;
+  hoverCell = cellAt(mx, my);
 });
 
-canvas.addEventListener('mouseleave', () => { hoverWall = null; });
+canvas.addEventListener('mouseleave', () => { hoverWall = null; hoverCell = null; });
 
 canvas.addEventListener('click', async e => {
   if (!state || state.game_over || !isHumanTurn()) return;
@@ -98,17 +110,15 @@ canvas.addEventListener('click', async e => {
   if (!cell) return;
   const k = key(cell);
 
-  if (selected) {
-    if (state.legal_moves.some(m => key(m) === k)) {
-      const prev = state;
-      const res = await api('/api/move', { move: ['move', [cell[0], cell[1]]] });
-      if (!res || res.error) { state = prev; render(); return; }
-      adopt(res);
-    } else {
-      selected = null;
-    }
+  if (state.legal_moves.some(m => key(m) === k)) {
+    const prev = state;
+    const res = await api('/api/move', { move: ['move', [cell[0], cell[1]]] });
+    if (!res || res.error) { state = prev; render(); return; }
+    adopt(res);
   } else if (k === key(state.positions[state.turn])) {
-    selected = k;
+    selected = selected === k ? null : k;   // toggle pawn highlight
+  } else {
+    selected = null;
   }
 });
 
@@ -121,18 +131,131 @@ async function doAiMove() {
   adopt(res);
 }
 
+// ----- menu -----
+
+const menuEl = document.getElementById('menu');
+const modeSel = document.getElementById('m-mode');
+const engineSel = document.getElementById('m-engine');
+const sideSel = document.getElementById('m-side');
+const timeInp = document.getElementById('m-time');
+const flipInp = document.getElementById('m-flip');
+const engineF = document.getElementById('m-engine-f');
+const sideF = document.getElementById('m-side-f');
+
+function populateEngineSelect() {
+  engineSel.innerHTML = '';
+  const list = engines.list || ['greedy'];
+  for (const name of list) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    engineSel.appendChild(opt);
+  }
+  if (engines.default) engineSel.value = engines.default;
+}
+
+function openMenu() {
+  sideSel.value = String(state && state.ai_player === 0 ? 0 : 1);
+  menuEl.classList.remove('hidden');
+}
+
+function closeMenu() {
+  menuEl.classList.add('hidden');
+}
+
+function onModeChange() {
+  const ai = modeSel.value !== 'pvp';
+  engineF.classList.toggle('hidden', !ai);
+  sideF.classList.toggle('hidden', modeSel.value !== 'ai');
+}
+
+document.getElementById('btn-new').addEventListener('click', openMenu);
+document.getElementById('m-cancel').addEventListener('click', closeMenu);
+modeSel.addEventListener('change', onModeChange);
+
+document.getElementById('m-start').addEventListener('click', async () => {
+  const mode2 = modeSel.value;
+  const engine = engineSel.value;
+  const aiPlayer = mode2 === 'ai' ? parseInt(sideSel.value, 10) : 1;
+  const tc = Math.max(0, parseFloat(timeInp.value) || 0);
+  closeMenu();
+  const state2 = await startNew(mode2, aiPlayer, engine, tc || null);
+  if (!state2 || state2.error) return;
+  if (flipInp.checked) flip = true;
+  display = state2.positions.map(p => [p[0], p[1]]);
+  adopt(state2);
+});
+
+document.getElementById('btn-flip').addEventListener('click', () => {
+  flip = !flip;
+});
+
+document.getElementById('chk-debug').addEventListener('change', e => {
+  debugOn = e.target.checked;
+  updateDebug();
+});
+
+function updateDebug() {
+  if (!state) return;
+  if (!debugOn) { debugEl.classList.add('hidden'); return; }
+  debugEl.classList.remove('hidden');
+  const lines = [];
+  if (state.mode !== 'pvp') {
+    const info = state.engine_info;
+    if (info) {
+      lines.push('Engine: ' + (info.engine || '?'));
+      if (info.info && Object.keys(info.info).length) {
+        lines.push(Object.entries(info.info).map(([k, v]) => k + ': ' + v).join('  ·  '));
+      }
+    }
+  }
+  if (state.last_action) lines.push('Last move: ' + JSON.stringify(state.last_action));
+  debugEl.textContent = lines.join('\n') || 'No info yet.';
+}
+
 // ----- rendering -----
 
+function applyTransform() {
+  if (flip) ctx.setTransform(-1, 0, 0, -1, SIZE, SIZE);
+  else ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
 function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, SIZE, SIZE);
-  ctx.fillStyle = '#f5f0e1';
+  applyTransform();
+
+  // board background
+  const bg = ctx.createLinearGradient(0, 0, 0, SIZE);
+  bg.addColorStop(0, '#efe7d4');
+  bg.addColorStop(1, '#e4d9c2');
+  ctx.fillStyle = bg;
   ctx.fillRect(0, 0, SIZE, SIZE);
 
-  ctx.fillStyle = 'rgba(0,0,0,0.06)';
-  ctx.fillRect(0, 0, SIZE, CELL);           // P1 goal (top)
-  ctx.fillRect(0, SIZE - CELL, SIZE, CELL); // P2 goal (bottom)
+  // goal zones
+  const goalTop = ctx.createLinearGradient(0, 0, 0, CELL);
+  goalTop.addColorStop(0, COLORS[0] + '55');
+  goalTop.addColorStop(1, COLORS[0] + '00');
+  ctx.fillStyle = goalTop;
+  ctx.fillRect(0, 0, SIZE, CELL);
+  const goalBot = ctx.createLinearGradient(0, SIZE - CELL, 0, SIZE);
+  goalBot.addColorStop(0, COLORS[1] + '00');
+  goalBot.addColorStop(1, COLORS[1] + '55');
+  ctx.fillStyle = goalBot;
+  ctx.fillRect(0, SIZE - CELL, SIZE, CELL);
 
-  ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+  // grid
+  ctx.strokeStyle = 'rgba(60,50,30,0.35)'; ctx.lineWidth = 1;
   for (let i = 0; i <= N; i++) {
     ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, SIZE); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(SIZE, i * CELL); ctx.stroke();
@@ -142,19 +265,26 @@ function render() {
   drawWallSet(state.v_walls, 'V');
 
   // always-visible hints for the player to move
-  if (!state.game_over) {
+  if (!state.game_over && isHumanTurn()) {
     for (const [ori, r, c] of state.legal_walls) {
-      drawWall(ori, r, c, 'rgba(0,180,0,0.15)');
+      drawWall(ori, r, c, 'rgba(60,180,60,0.12)');
     }
-    const dots = state.legal_moves.map(key);
     for (const [r, c] of state.legal_moves) {
-      const active = selected && dots.includes(key([r, c]));
       dot(c * CELL + CELL / 2, r * CELL + CELL / 2,
-          active ? 'rgba(0,160,0,1)' : 'rgba(0,160,0,0.5)', active ? 9 : 7);
+          selected && selected === key([r, c]) ? 'rgba(46,170,70,0.95)' : 'rgba(46,170,70,0.45)',
+          selected && selected === key([r, c]) ? 9 : 7);
     }
   }
 
-  if (hoverWall) drawWall(hoverWall.ori, hoverWall.r, hoverWall.c, 'rgba(0,200,0,0.9)');
+  // hover feedback
+  if (hoverWall) drawWall(hoverWall.ori, hoverWall.r, hoverWall.c, 'rgba(46,170,70,0.85)');
+  if (hoverCell && !hoverWall) {
+    const [r, c] = hoverCell;
+    if (state.legal_moves.some(m => key(m) === key([r, c]))) {
+      ctx.fillStyle = 'rgba(46,170,70,0.18)';
+      ctx.fillRect(c * CELL + 3, r * CELL + 3, CELL - 6, CELL - 6);
+    }
+  }
 
   // last move highlight
   if (state.last_action) {
@@ -164,35 +294,54 @@ function render() {
       ctx.strokeStyle = 'rgba(255,180,0,0.9)'; ctx.lineWidth = 4;
       ctx.strokeRect(c * CELL + 5, r * CELL + 5, CELL - 10, CELL - 10);
     } else if (kind === 'wall') {
-      drawWall(arg[0], arg[1], arg[2], 'rgba(255,180,0,0.9)');
+      drawWall(arg[0], arg[1], arg[2], 'rgba(255,180,0,0.85)');
     }
   }
 
+  // pawns
   state.positions.forEach((p, i) => {
     const t = display[i];
     const x = t[1] * CELL + CELL / 2, y = t[0] * CELL + CELL / 2;
-    ctx.beginPath(); ctx.arc(x, y, 25, 0, Math.PI * 2);
-    ctx.fillStyle = COLORS[i]; ctx.fill();
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetY = 3;
+    const g = ctx.createRadialGradient(x - 7, y - 9, 4, x, y, 25);
+    g.addColorStop(0, COLORS[i]);
+    g.addColorStop(1, COLORS_DARK[i]);
+    ctx.beginPath(); ctx.arc(x, y, 24, 0, Math.PI * 2);
+    ctx.fillStyle = g; ctx.fill();
+    ctx.restore();
     ctx.lineWidth = 3; ctx.strokeStyle = '#222'; ctx.stroke();
     if (selected === key(p)) {
       ctx.lineWidth = 4; ctx.strokeStyle = '#ffd54f'; ctx.stroke();
     }
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(NAMES[i], x, y);
+    ctx.fillText(NAMES[i], x, y + 1);
   });
 
   updateHud();
 }
 
 function drawWallSet(walls, ori) {
-  for (const [r, c] of walls) drawWall(ori, r, c, '#3b3b3b');
+  for (const [r, c] of walls) drawWall(ori, r, c, '#43392b');
 }
 
 function drawWall(ori, r, c, color) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.25)';
+  ctx.shadowBlur = 4;
+  ctx.shadowOffsetY = 2;
   ctx.fillStyle = color;
-  if (ori === 'H') ctx.fillRect(c * CELL, (r + 1) * CELL - 7, 2 * CELL, 14);
-  else ctx.fillRect((c + 1) * CELL - 7, r * CELL, 14, 2 * CELL);
+  if (ori === 'H') {
+    roundRectPath(c * CELL + 1, (r + 1) * CELL - 8, 2 * CELL - 2, 16, 6);
+    ctx.fill();
+  } else {
+    roundRectPath((c + 1) * CELL - 8, r * CELL + 1, 16, 2 * CELL - 2, 6);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function dot(x, y, color, r) {
@@ -232,9 +381,9 @@ function updateHud() {
     hintEl.textContent = 'Click "New game" to play again.';
   } else {
     statusEl.textContent = 'Turn: ' + NAMES[state.turn];
-    if (aiBusy) hintEl.textContent = 'AI thinking...';
-    else if (!isHumanTurn()) hintEl.textContent = 'AI thinking...';
-    else hintEl.textContent = 'Click your pawn, a green square to move, or a grid line to place a wall.';
+    if (aiBusy) { statusEl.textContent = 'AI thinking…'; hintEl.textContent = ''; }
+    else if (!isHumanTurn()) { statusEl.textContent = 'AI thinking…'; hintEl.textContent = ''; }
+    else hintEl.textContent = 'Click a green dot to move, or a grid line to place a wall.';
   }
 }
 
@@ -268,29 +417,12 @@ function startNew(mode2, aiPlayer, engine, timeControl) {
   return api('/api/new', { mode: mode2, ai_player: aiPlayer, engine, time_control: timeControl });
 }
 
-document.getElementById('btn-new').addEventListener('click', async () => {
-  const choice = prompt('Mode:\n1 = PvP\n2 = vs AI (kernel)\n3 = vs AI (alpha-beta)\n4 = vs AI (greedy)\n5 = vs AI (MCTS)\n6 = AI vs AI (kernel)\n\nTime per player in seconds (0 = none):');
-  if (choice === null) return;
-  const parts = choice.trim().split(/\s+/);
-  const sel = parts[0];
-  let tc = parseFloat(parts[1]);
-  if (!Number.isFinite(tc) || tc < 0) tc = null;
-  let state2;
-  if (sel === '1') state2 = await startNew('pvp', 1, 'kernel', tc);
-  else if (sel === '2') state2 = await startNew('ai', 1, 'kernel', tc);
-  else if (sel === '3') state2 = await startNew('ai', 1, 'alphabeta', tc);
-  else if (sel === '4') state2 = await startNew('ai', 1, 'greedy', tc);
-  else if (sel === '5') state2 = await startNew('ai', 1, 'mcts', tc);
-  else if (sel === '6') state2 = await startNew('ai2', 1, 'kernel', tc);
-  else return;
-  if (!state2 || state2.error) return;
-  display = state2.positions.map(p => [p[0], p[1]]);
-  adopt(state2);
-});
-
 // ----- init -----
 
 (async () => {
+  engines = await api('/api/meta');
+  populateEngineSelect();
+  onModeChange();
   state = await api('/api/state');
   display = state.positions.map(p => [p[0], p[1]]);
   adopt(state);

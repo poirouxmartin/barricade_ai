@@ -113,5 +113,39 @@ class TestWalls(unittest.TestCase):
             g.apply(("wall", ("H", 3, 3)))
 
 
+class TestClock(unittest.TestCase):
+    def test_clock_initialized(self):
+        g = Barricade(time_control=60)
+        self.assertEqual(g.time_left, [60, 60])
+        g2 = Barricade()
+        self.assertIsNone(g2.time_left)
+
+    def test_clock_charged_and_turn_switches(self):
+        g = Barricade(time_control=60)
+        g.apply(("move", (7, 4)))  # first move: clock starts, no charge
+        self.assertEqual(g.turn, 1)
+        self.assertEqual(g.time_left[0], 60)
+        g.apply(("move", (1, 4)))  # player 1 charges elapsed time
+        self.assertLessEqual(g.time_left[1], 60)
+        self.assertEqual(g.turn, 0)
+        self.assertIsNotNone(g._last_move_at)
+
+    def test_timeout_loses(self):
+        g = Barricade(time_control=60)
+        g.apply(("move", (7, 4)))  # player 0 moves, clock started
+        g.time_left[1] = 0.0
+        g._tick_clock(1)  # any elapsed time makes player 1 go negative
+        self.assertEqual(g.winner, 0)
+        self.assertEqual(g.game_over_reason, "time")
+
+    def test_clone_preserves_clock(self):
+        g = Barricade(time_control=60)
+        g.apply(("move", (7, 4)))
+        c = g.clone()
+        self.assertEqual(c.time_control, 60)
+        self.assertAlmostEqual(c.time_left[1], g.time_left[1], places=6)
+        self.assertEqual(c.time_left[0], 60)
+
+
 if __name__ == "__main__":
     unittest.main()

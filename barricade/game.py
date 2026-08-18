@@ -1,5 +1,6 @@
 """Barricade game engine (rules only, no UI/AI)."""
 
+import time
 from collections import deque
 
 SIZE = 9
@@ -20,16 +21,24 @@ class Barricade:
       H wall (r, c): blocks vertical movement between rows r/r+1 at columns c and c+1.
       V wall (r, c): blocks horizontal movement between columns c/c+1 at rows r and r+1.
     Crossing (H and V sharing (r, c)) is illegal.
+
+    Optional clock: `time_control` seconds per player for the whole game.
+    Each move's wall-clock duration is charged to the mover; a player whose
+    clock runs out loses the game (`game_over_reason == "time"`).
     """
 
-    def __init__(self):
+    def __init__(self, time_control=None):
         self.positions = [START[0], START[1]]
         self.walls_left = [N_WALLS, N_WALLS]
         self.h_walls = set()
         self.v_walls = set()
         self.turn = 0
         self.winner = None
+        self.game_over_reason = None
         self.history = []
+        self.time_control = time_control
+        self.time_left = [time_control, time_control] if time_control else None
+        self._last_move_at = None
 
     # ----- edges & connectivity -----
 
@@ -191,8 +200,23 @@ class Barricade:
             self.history.append(("wall", player, arg))
         else:
             raise ValueError("unknown action")
+        if self.time_control and self.winner is None:
+            self._tick_clock(player)
+        if self.winner is not None and self.game_over_reason is None:
+            self.game_over_reason = "goal"
         if self.winner is None:
             self.turn = 1 - player
+
+    def _tick_clock(self, player):
+        """Charge the elapsed wall-clock to the mover; first move starts the clock."""
+        now = time.monotonic()
+        if self._last_move_at is not None:
+            self.time_left[player] -= now - self._last_move_at
+            if self.time_left[player] <= 0:
+                self.time_left[player] = 0.0
+                self.winner = 1 - player
+                self.game_over_reason = "time"
+        self._last_move_at = now
 
     def clone(self):
         g = Barricade.__new__(Barricade)
@@ -202,7 +226,11 @@ class Barricade:
         g.v_walls = set(self.v_walls)
         g.turn = self.turn
         g.winner = self.winner
+        g.game_over_reason = self.game_over_reason
         g.history = list(self.history)
+        g.time_control = self.time_control
+        g.time_left = list(self.time_left) if self.time_left else None
+        g._last_move_at = self._last_move_at
         return g
 
     def to_dict(self):
@@ -214,6 +242,10 @@ class Barricade:
             "v_walls": [list(w) for w in sorted(self.v_walls)],
             "winner": self.winner,
             "game_over": self.winner is not None,
+            "game_over_reason": self.game_over_reason,
+            "time_control": self.time_control,
+            "time_left": list(self.time_left) if self.time_left else None,
+            "last_action": self.history[-1] if self.history else None,
             "legal_moves": [list(m) for m in self.legal_moves(self.turn)],
             "legal_walls": [list(w) for w in self.legal_walls(self.turn)],
         }

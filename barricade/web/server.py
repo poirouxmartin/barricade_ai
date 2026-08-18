@@ -18,10 +18,19 @@ except ImportError:
     KernelEngine = None
     _HAS_NUMBA = False
 
+try:
+    from barricade.engine.mcts import MctsEngine
+    _HAS_MCTS = True
+except ImportError:
+    MctsEngine = None
+    _HAS_MCTS = False
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 ENGINES = {"random": RandomEngine, "greedy": GreedyEngine, "alphabeta": AlphaBetaEngine}
 if _HAS_NUMBA:
     ENGINES["kernel"] = KernelEngine
+if _HAS_MCTS:
+    ENGINES["mcts"] = MctsEngine
 DEFAULT_ENGINE = "kernel" if _HAS_NUMBA else "alphabeta"
 
 
@@ -38,9 +47,9 @@ class App:
         with self.lock:
             return fn()
 
-    def new(self, mode, ai_player=1, engine="alphabeta"):
+    def new(self, mode, ai_player=1, engine="alphabeta", time_control=None):
         def _new():
-            self.game = Barricade()
+            self.game = Barricade(time_control=time_control)
             if mode == "ai":
                 self.ai_player = ai_player if ai_player in (0, 1) else 1
                 self.engine = self._make_engine(engine)
@@ -56,7 +65,20 @@ class App:
         cls = ENGINES.get(name, ENGINES[DEFAULT_ENGINE])
         if cls in (AlphaBetaEngine, KernelEngine):
             return cls(max_depth=self.depth, time_limit=self.time_limit)
+        if cls is MctsEngine:
+            return cls(time_limit=self.time_limit)
         return cls()
+
+    def _set_engine_time(self, player):
+        """Clamp the engine's time budget to the player's remaining clock."""
+        if not self.game.time_left:
+            return
+        left = self.game.time_left[player]
+        if left is None:
+            return
+        budget = max(0.05, min(self.time_limit, left - 0.2))
+        if hasattr(self.engine, "time_limit"):
+            self.engine.time_limit = budget
 
     def state(self):
         def _state():
@@ -74,7 +96,6 @@ class App:
                     self.game.apply(("wall", (move[1][0], move[1][1], move[1][2])))
                 else:
                     return None, "bad action"
-                self._auto_ai()
                 return self.state(), None
             except ValueError as e:
                 return None, str(e)
@@ -82,22 +103,16 @@ class App:
 
     def ai_move(self):
         def _ai():
-            if self.ai_player is None or self.ai_player == "both":
+            if self.ai_player is None:
                 return None, "AI not active"
-            if self.game.winner is not None or self.game.turn != self.ai_player:
+            if self.game.winner is not None:
+                return None, "game over"
+            if self.ai_player != "both" and self.game.turn != self.ai_player:
                 return None, "not AI turn"
+            self._set_engine_time(self.game.turn)
             self.game.apply(self.engine.choose_move(self.game))
             return self.state(), None
         return self._with_lock(_ai)
-
-    def _auto_ai(self):
-        if self.ai_player is None:
-            return
-        if self.game.winner is not None:
-            return
-        if self.ai_player == "both" or self.game.turn == self.ai_player:
-            self.game.apply(self.engine.choose_move(self.game))
-            self._auto_ai()  # in 'both' mode keep going until a human turn or game over
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -147,7 +162,12 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}") if length else {}
         if path == "/api/new":
-            self._json(app.new(body.get("mode", "pvp"), body.get("ai_player", 1), body.get("engine", "greedy")))
+            self._json(app.new(
+                body.get("mode", "pvp"),
+                body.get("ai_player", 1),
+                body.get("engine", "greedy"),
+                body.get("time_control"),
+            ))
         elif path == "/api/move":
             res, err = app.play(body.get("move"))
             self._json(res, 200 if err is None else 400)

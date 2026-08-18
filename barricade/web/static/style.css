@@ -14,6 +14,8 @@ h1 { margin: 0 0 8px; font-size: 22px; }
 .player.active { color: #ffd54f; }
 .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; }
 .wcount { opacity: .7; font-weight: 400; }
+.clock { font-variant-numeric: tabular-nums; margin: 0 6px; opacity: .85; }
+.clock.low { color: #ff6b6b; }
 #status { font-weight: 600; color: #ffd54f; }
 canvas {
   display: block; width: 100%; border-radius: 8px;

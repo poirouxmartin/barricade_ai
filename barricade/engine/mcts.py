@@ -33,7 +33,8 @@ except ImportError:
     kernel = None
     _HAS_NUMBA = False
 
-WALL_PROB = 0.4
+WALL_PROB = 0.3
+WALL_TRIES = 4
 SIM_PLIES = 60
 UCT_C = 1.4
 EVAL_SCALE = 30.0
@@ -71,6 +72,24 @@ def expand(node, pool_st, cstart, ccount, ca, cv, next_ch, zob):
     max_ch = ca.shape[0]
     moves = np.zeros(16, np.int64)
     nm = kernel.gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
+    keys = np.zeros(16, np.int64)
+    for i in range(nm):
+        mr = moves[i] // 9
+        mc = moves[i] - mr * 9
+        if turn == 0:
+            keys[i] = mr * 9 + abs(mc - 4)
+        else:
+            keys[i] = (8 - mr) * 9 + abs(mc - 4)
+    for i in range(1, nm):
+        mv = moves[i]
+        kv = keys[i]
+        j = i - 1
+        while j >= 0 and keys[j] > kv:
+            moves[j + 1] = moves[j]
+            keys[j + 1] = keys[j]
+            j -= 1
+        moves[j + 1] = mv
+        keys[j + 1] = kv
     for i in range(nm):
         if base + n >= max_ch:
             break
@@ -92,8 +111,25 @@ def expand(node, pool_st, cstart, ccount, ca, cv, next_ch, zob):
 
 
 @njit(cache=True)
+def opp_dist_after(st, w, zob):
+    """BFS distance to goal of the non-mover after applying wall `w` to `st`."""
+    child = kernel.apply_wall(st, w, zob)
+    if child[12] == 0:
+        return kernel.flood_dist(child[0], child[4], child[5], child[6],
+                                 child[7], kernel.GOAL0_HI, kernel.GOAL0_LO)
+    return kernel.flood_dist(child[1], child[4], child[5], child[6],
+                             child[7], kernel.GOAL1_HI, kernel.GOAL1_LO)
+
+
+@njit(cache=True)
 def simulate(st, zob):
-    """BFS-greedy race playout; returns the result from the mover's perspective."""
+    """Greedy race + greedy-wall playout; result from the mover's perspective.
+
+    Moves always advance toward the goal (random among equal-distance targets).
+    Wall moves are only tried with probability WALL_PROB and only placed when
+    they actually lengthen the opponent's BFS distance, so playouts produce
+    real blocking instead of random wall spam.
+    """
     st = norm_state(st)
     for _ in range(SIM_PLIES):
         if is_terminal(st):
@@ -106,23 +142,43 @@ def simulate(st, zob):
             walls = np.zeros(32, np.int64)
             nw = kernel.gen_walls(st, my, opp, walls, kernel.WALL_CAP)
             if nw > 0:
-                st = kernel.apply_wall(st, walls[np.random.randint(0, nw)], zob)
-                continue
-        buf = np.zeros(81, np.int64)
-        kernel.flood_dists(my, hb_hi, hb_lo, vb_hi, vb_lo, buf)
+                if turn == 0:
+                    base_d = kernel.flood_dist(opp, hb_hi, hb_lo, vb_hi, vb_lo,
+                                               kernel.GOAL1_HI, kernel.GOAL1_LO)
+                else:
+                    base_d = kernel.flood_dist(opp, hb_hi, hb_lo, vb_hi, vb_lo,
+                                               kernel.GOAL0_HI, kernel.GOAL0_LO)
+                best_w = -1
+                best_gain = 0
+                for t in range(min(nw, WALL_TRIES)):
+                    w = walls[np.random.randint(0, nw)]
+                    gain = opp_dist_after(st, w, zob) - base_d
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_w = w
+                if best_w >= 0:
+                    st = kernel.apply_wall(st, best_w, zob)
+                    continue
         moves = np.zeros(16, np.int64)
         nm = kernel.gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
         if nm == 0:
             break
-        best_d = 1000
+        # race greedily toward the goal row: minimize (row, |col-4|) for P1,
+        # maximize row for P2 (jumps land further and win the tiebreak).
+        best_key = 1 << 60
         best_n = 0
         best_idx = np.zeros(8, np.int64)
         for i in range(nm):
-            d = buf[moves[i]]
-            if d < best_d:
-                best_d = d
+            mr = moves[i] // 9
+            mc = moves[i] - mr * 9
+            if turn == 0:
+                key = mr * 9 + abs(mc - 4)
+            else:
+                key = (8 - mr) * 9 + abs(mc - 4)
+            if key < best_key:
+                best_key = key
                 best_n = 0
-            if d == best_d and best_n < 8:
+            if key == best_key and best_n < 8:
                 best_idx[best_n] = i
                 best_n += 1
         st = kernel.apply_move(st, moves[best_idx[np.random.randint(0, best_n)]], zob)
@@ -255,6 +311,7 @@ class MctsEngine(Engine):
         self.last_info = {}
         self.progress = {}
         self._warm = False
+        self.REP_WINDOW = 12  # plies; a key seen again inside this window is a repetition
 
     def _warmup(self):
         if self._warm:
@@ -277,10 +334,39 @@ class MctsEngine(Engine):
         self.visits[0] = 0
         self.vsum[0] = 0.0
 
+    def _recent_keys(self, game):
+        """Zobrist keys of the last REP_WINDOW positions (current included)."""
+        from barricade.game import Barricade
+
+        k = kernel
+        g = Barricade()
+        st = k.make_state(g, self.zob)
+        keys = []
+        for kind, _player, arg in game.history:
+            if kind == "move":
+                st = k.apply_move(st, arg[0] * 9 + arg[1], self.zob)
+            else:
+                ori, r, c = arg
+                ob = 0 if ori == "H" else 1
+                st = k.apply_wall(st, k.WALL_BASE + ob * 64 + r * 8 + c, self.zob)
+            keys.append(st[14])
+        if len(keys) <= self.REP_WINDOW:
+            return set(keys)
+        return set(keys[-self.REP_WINDOW:])
+
+    def _repeats(self, st, action, recent):
+        k = kernel
+        if action < k.WALL_BASE:
+            child = k.apply_move(st, action, self.zob)
+        else:
+            child = k.apply_wall(st, action, self.zob)
+        return child[14] in recent
+
     def choose_move(self, game):
         self._warmup()
         self._reset_tree()
         st = kernel.make_state(game, self.zob)
+        recent = self._recent_keys(game)
         deadline = time.time() + self.time_limit
         best = random.choice(game.legal_actions())
         total_iters = 0
@@ -307,7 +393,25 @@ class MctsEngine(Engine):
                 break
         action = best_action(self.cstart, self.ccount, self.ca, self.cv, self.visits)
         if action >= 0:
-            best = kernel.decode_action(action)
+            best = self._guard_repetition(st, action, recent)
         self.last_info = {"iterations": total_iters,
                           "nodes": int(self.n_nodes[0])}
         return best
+
+    def _guard_repetition(self, st, action, recent):
+        """If the most-visited child repeats a recent position, pick the next
+        most-visited non-repeating child."""
+        if not self._repeats(st, action, recent):
+            return kernel.decode_action(action)
+        base = int(self.cstart[0])
+        nc = int(self.ccount[0])
+        children = []
+        for k in range(nc):
+            c = int(self.ca[base + k])
+            if c >= 0:
+                children.append((int(self.visits[c]), int(self.cv[base + k])))
+        children.sort(reverse=True)
+        for _v, a in children:
+            if a >= 0 and not self._repeats(st, a, recent):
+                return kernel.decode_action(a)
+        return kernel.decode_action(action)

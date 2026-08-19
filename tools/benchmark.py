@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from barricade.engine.greedy import GreedyEngine
 from barricade.engine.random import RandomEngine
 from barricade.engine.numba_engine import KernelEngine
+from barricade.engine.mcts import MctsEngine
 from barricade.game import Barricade
 
 LOCKUP_PLIES = 120
@@ -52,6 +53,8 @@ ENGINES = {
 
 
 def make(name, time_limit, depth):
+    if name == "mcts":
+        return MctsEngine(time_limit=time_limit)
     if name not in ENGINES:
         raise SystemExit(f"unknown engine {name!r}; use --list")
     kw = {"time_limit": time_limit, "max_depth": depth}

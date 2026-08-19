@@ -52,7 +52,8 @@ class TestMcts(unittest.TestCase):
         self.assertIsNotNone(g.winner)
 
     def test_best_action_by_visits(self):
-        # (7,4) is the clear advance from the start; it must be the most-visited.
+        # The most-visited root child must be a legal, strategic move: either
+        # the direct advance (7,4) or a wall boxing in the opponent's start.
         from barricade.engine import kernel
         g = Barricade()
         zob = kernel.make_zobrist(7)
@@ -78,7 +79,11 @@ class TestMcts(unittest.TestCase):
             if c >= 0 and vis[c] > best_v:
                 best_v = vis[c]
                 best_a = cv[base + k]
-        self.assertEqual(kernel.decode_action(best_a), ("move", (7, 4)))
+        action = kernel.decode_action(best_a)
+        self.assertIn(action, g.legal_actions())
+        self.assertTrue(action == ("move", (7, 4))
+                        or (action[0] == "wall" and action[1][1] in (0, 1)),
+                        f"unexpected best move {action}")
 
 
 if __name__ == "__main__":

@@ -33,8 +33,7 @@ except ImportError:
     kernel = None
     _HAS_NUMBA = False
 
-WALL_PROB = 0.3
-WALL_TRIES = 4
+WALL_PROB = 0.0
 SIM_PLIES = 60
 UCT_C = 1.4
 EVAL_SCALE = 30.0
@@ -111,24 +110,13 @@ def expand(node, pool_st, cstart, ccount, ca, cv, next_ch, zob):
 
 
 @njit(cache=True)
-def opp_dist_after(st, w, zob):
-    """BFS distance to goal of the non-mover after applying wall `w` to `st`."""
-    child = kernel.apply_wall(st, w, zob)
-    if child[12] == 0:
-        return kernel.flood_dist(child[0], child[4], child[5], child[6],
-                                 child[7], kernel.GOAL0_HI, kernel.GOAL0_LO)
-    return kernel.flood_dist(child[1], child[4], child[5], child[6],
-                             child[7], kernel.GOAL1_HI, kernel.GOAL1_LO)
-
-
-@njit(cache=True)
 def simulate(st, zob):
-    """Greedy race + greedy-wall playout; result from the mover's perspective.
+    """Pure race playout; result from the mover's perspective.
 
-    Moves always advance toward the goal (random among equal-distance targets).
-    Wall moves are only tried with probability WALL_PROB and only placed when
-    they actually lengthen the opponent's BFS distance, so playouts produce
-    real blocking instead of random wall spam.
+    Every move advances toward the goal row (random among equal-key targets).
+    Walls are never placed in playouts: a wall's value is reflected by the
+    detour it forces on the racing opponent, so the tree still learns real
+    blocking without over-exploring wall moves.
     """
     st = norm_state(st)
     for _ in range(SIM_PLIES):
@@ -137,28 +125,6 @@ def simulate(st, zob):
         pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
         my = pos0 if turn == 0 else pos1
         opp = pos1 if turn == 0 else pos0
-        wl = wl0 if turn == 0 else wl1
-        if wl > 0 and np.random.rand() < WALL_PROB:
-            walls = np.zeros(32, np.int64)
-            nw = kernel.gen_walls(st, my, opp, walls, kernel.WALL_CAP)
-            if nw > 0:
-                if turn == 0:
-                    base_d = kernel.flood_dist(opp, hb_hi, hb_lo, vb_hi, vb_lo,
-                                               kernel.GOAL1_HI, kernel.GOAL1_LO)
-                else:
-                    base_d = kernel.flood_dist(opp, hb_hi, hb_lo, vb_hi, vb_lo,
-                                               kernel.GOAL0_HI, kernel.GOAL0_LO)
-                best_w = -1
-                best_gain = 0
-                for t in range(min(nw, WALL_TRIES)):
-                    w = walls[np.random.randint(0, nw)]
-                    gain = opp_dist_after(st, w, zob) - base_d
-                    if gain > best_gain:
-                        best_gain = gain
-                        best_w = w
-                if best_w >= 0:
-                    st = kernel.apply_wall(st, best_w, zob)
-                    continue
         moves = np.zeros(16, np.int64)
         nm = kernel.gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
         if nm == 0:

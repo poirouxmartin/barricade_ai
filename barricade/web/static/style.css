@@ -149,3 +149,89 @@ button.small { padding: 3px 10px; font-size: 12px; }
 
 @keyframes fade { from { opacity: 0; } }
 @keyframes pop { from { opacity: 0; transform: scale(.92); } }
+
+/* ----- navigation ----- */
+#nav {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 6px 10px; margin-bottom: 8px;
+  overflow: hidden;
+}
+#nav button { padding: 4px 10px; font-size: 13px; }
+#nav-pos { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#nav-list {
+  flex: 1; display: flex; gap: 4px; overflow-x: auto; padding: 2px 0;
+}
+#nav-list button {
+  flex-shrink: 0; padding: 2px 8px; font-size: 11px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+#nav-list button.cur { border-color: var(--accent); color: var(--accent); }
+
+/* ----- evaluation bar ----- */
+#evalbar {
+  position: relative; height: 14px; margin-top: 10px;
+  background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 7px; overflow: hidden;
+}
+#eval-fill {
+  position: absolute; inset: 0 auto 0 0; width: 50%;
+  background: linear-gradient(90deg, #c0563d, #e76f51);
+}
+#eval-marker {
+  position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+  background: rgba(255,255,255,.85);
+}
+#eval-labels {
+  position: absolute; inset: 0; display: flex; justify-content: space-between;
+  align-items: center; padding: 0 6px;
+  font-size: 10px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.8);
+}
+#eval-detail {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  color: var(--muted); margin-top: 4px;
+}
+
+/* ----- analysis params ----- */
+.anal-params {
+  display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap;
+}
+.anal-params label {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--muted);
+}
+.anal-params input {
+  width: 64px; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 6px; font-size: 12px;
+}
+.anal-params input:focus { outline: none; border-color: var(--accent); }
+
+/* top-move rows are clickable when analysis matches the live position */
+#anal-top .top-row { cursor: default; }
+#anal-top .top-row.clickable { cursor: pointer; }
+#anal-top .top-row.clickable:hover { background: rgba(255,213,79,.08); border-radius: 6px; }
+#anal-top .top-row.clickable:hover .top-label { color: var(--accent); }
+
+/* ----- heuristics panel ----- */
+.heur { margin-top: 10px; }
+.heur summary {
+  cursor: pointer; font-size: 11px; color: var(--muted);
+  user-select: none; margin-bottom: 4px;
+}
+.heur summary:hover { color: var(--text); }
+.heur-body { font-size: 12px; color: var(--text); line-height: 1.55; }
+.heur-body h4 { margin: 10px 0 4px; font-size: 12px; color: var(--accent); }
+.heur-line { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+.heur-line .k { color: var(--muted); }
+.heur-line .v { font-family: ui-monospace, Consolas, monospace; }
+.heur-desc { color: var(--muted); font-size: 11px; }
+.heur p { margin: 4px 0; }
+
+/* ----- match ----- */
+#match { margin-top: 10px; }
+#match-results { font-size: 12px; line-height: 1.6; }
+.match-score { font-weight: 700; margin-bottom: 6px; }
+.match-game { display: flex; gap: 8px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+.match-game.win { color: var(--green); }
+.field label.mt { margin-top: 8px; }

@@ -18,6 +18,7 @@ import numpy as np
 from barricade.engine import kernel
 from barricade.engine.numba_engine import KernelEngine
 from barricade.engine.mcts import MctsEngine, mcts_run, best_action, EVAL_SCALE
+from barricade.engine import evaluate
 
 MAX_DEPTH = 30
 TOP_MOVES = 5
@@ -32,16 +33,17 @@ MCTS_TICK = 0.25  # seconds of iterations between snapshot updates
 
 class AnalysisSession:
     def __init__(self, game, engine="kernel", max_depth=MAX_DEPTH, top_moves=TOP_MOVES,
-                 tt_size=TT_SIZE, mcts_nodes=MCTS_NODES):
+                 tt_size=TT_SIZE, mcts_nodes=MCTS_NODES, mcts_tick=MCTS_TICK):
         if engine not in ("kernel", "mcts"):
             raise ValueError(f"unknown analysis engine: {engine!r}")
         self.engine = engine
         self._tt_size = tt_size
-        self._mcts_nodes = mcts_nodes
+        self._mcts_nodes = mcts_nodes or MCTS_NODES
+        self._mcts_tick = mcts_tick or MCTS_TICK
         self._engine = None
         self._mcts = None
         self.game = game.clone()
-        self.max_depth = max_depth
+        self.max_depth = max_depth or MAX_DEPTH
         self.top_moves_n = top_moves
         self._stop = threading.Event()
         self._stop_flag = np.zeros(1, np.int64)
@@ -75,8 +77,27 @@ class AnalysisSession:
         self._stop_flag[0] = 1
         self.running = False
 
+    def _position_eval(self):
+        """Distance gap (squares) and confidence factor for the analyzed position."""
+        g = self.game
+        d0 = g.dist_to_goal(0)
+        d1 = g.dist_to_goal(1)
+        w0 = g.walls_left[0]
+        w1 = g.walls_left[1]
+        my_d, opp_d, my_w, opp_w = (d0, d1, w0, w1) if g.turn == 0 else (d1, d0, w1, w0)
+        raw = (opp_d - my_d) * evaluate.DIST_W
+        conf = 1.0
+        if raw > 0:
+            conf = max(1.0 - evaluate.CONF_W * opp_w, evaluate.CONF_FLOOR)
+        return {
+            "d0": d0, "d1": d1,
+            "dist_gap": opp_d - my_d,
+            "confidence": round(conf, 3),
+        }
+
     def state(self):
         with self._lock:
+            pe = self._position_eval()
             return {
                 "running": self.running,
                 "engine": self.engine,
@@ -92,6 +113,9 @@ class AnalysisSession:
                 "positions": self.game.positions,
                 "h_walls": sorted(self.game.h_walls),
                 "v_walls": sorted(self.game.v_walls),
+                "d0": pe["d0"], "d1": pe["d1"],
+                "dist_gap": pe["dist_gap"],
+                "confidence": pe["confidence"],
                 "error": self.error,
             }
 
@@ -181,7 +205,7 @@ class AnalysisSession:
             self._stop.clear()
 
     def _run_mcts(self):
-        me = MctsEngine(max_nodes=self._mcts_nodes, time_limit=MCTS_TICK, seed=7)
+        me = MctsEngine(max_nodes=self._mcts_nodes, time_limit=self._mcts_tick, seed=7)
         me._warmup()
         me._reset_tree()
         self._mcts = me
@@ -189,7 +213,7 @@ class AnalysisSession:
         t0 = time.time()
         total = 0
         while not self._stop.is_set():
-            allowance = int(MCTS_TICK * me.ips_est) + 1000
+            allowance = int(self._mcts_tick * me.ips_est) + 1000
             allowance = min(allowance, me.max_nodes - int(me.n_nodes[0]) - 1)
             if allowance <= 0:
                 break

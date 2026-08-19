@@ -18,7 +18,24 @@
       <span class="clock" id="c1"></span><span class="wcount" id="w1"></span><span class="pname">P2</span>
     </div>
   </div>
-  <canvas id="board" width="648" height="648"></canvas>
+
+  <div id="nav" class="hidden">
+    <button id="nav-prev" title="Previous move">‹</button>
+    <span id="nav-pos">0/0</span>
+    <button id="nav-next" title="Next move">›</button>
+    <button id="nav-live" class="small" title="Back to the live position">Live</button>
+    <div id="nav-list"></div>
+  </div>
+
+  <canvas id="board" width="696" height="696"></canvas>
+
+  <div id="evalbar" class="hidden">
+    <div id="eval-fill"></div>
+    <div id="eval-marker"></div>
+    <div id="eval-labels"><span id="eval-l"></span><span id="eval-r"></span></div>
+  </div>
+  <div id="eval-detail" class="hidden"></div>
+
   <div id="controls">
     <button id="btn-new">New game</button>
     <button id="btn-flip" title="Rotate the board">Rotate</button>
@@ -31,11 +48,17 @@
       <input type="checkbox" id="chk-debug"> Debug
     </label>
   </div>
+
   <div id="analysis" class="hidden">
     <div class="anal-head">
       <span class="anal-title">Analysis</span>
       <span id="anal-status"></span>
       <button id="btn-anal-stop" class="small">Stop</button>
+    </div>
+    <div id="anal-params" class="anal-params hidden">
+      <label>Depth <input id="par-depth" type="number" min="1" max="30" value="30"></label>
+      <label>Time/tick <input id="par-tick" type="number" min="0.05" step="0.05" value="0.25"></label>
+      <label>Nodes (k) <input id="par-nodes" type="number" min="16" step="16" value="262"></label>
     </div>
     <div id="anal-stats" class="anal-stats"></div>
     <div id="anal-pv" class="anal-pv"></div>
@@ -43,7 +66,7 @@
     <div class="anal-legend">
       <div class="leg-item">
         <svg viewBox="0 0 52 40" width="52" height="40" aria-hidden="true">
-          <rect x="10" y="8" width="24" height="24" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
+          <rect x="10" y="8" width="24" height="24" rx="3" fill="#2b3140" stroke="#5a6478" stroke-width="1.5"/>
           <line x1="2" y1="20" x2="10" y2="20" stroke="#fff" stroke-width="2.5" marker-end="url(#leg-arrow)"/>
           <circle cx="22" cy="20" r="5" fill="#d9534f"/>
           <defs>
@@ -56,23 +79,37 @@
       </div>
       <div class="leg-item">
         <svg viewBox="0 0 52 40" width="52" height="40" aria-hidden="true">
-          <rect x="6" y="6" width="20" height="20" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
-          <rect x="26" y="6" width="20" height="20" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
-          <rect x="8" y="30" width="36" height="8" rx="3" fill="#43392b"/>
+          <rect x="6" y="6" width="20" height="20" rx="3" fill="#2b3140" stroke="#5a6478" stroke-width="1.5"/>
+          <rect x="26" y="6" width="20" height="20" rx="3" fill="#2b3140" stroke="#5a6478" stroke-width="1.5"/>
+          <rect x="8" y="30" width="36" height="8" rx="3" fill="#9a8c74"/>
         </svg>
         <div class="leg-txt"><b>H e2</b> — mur horizontal sous les cases e2 et f2</div>
       </div>
       <div class="leg-item">
         <svg viewBox="0 0 52 40" width="52" height="40" aria-hidden="true">
-          <rect x="6" y="4" width="20" height="16" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
-          <rect x="6" y="20" width="20" height="16" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
-          <rect x="30" y="6" width="8" height="28" rx="3" fill="#43392b"/>
+          <rect x="6" y="4" width="20" height="16" rx="3" fill="#2b3140" stroke="#5a6478" stroke-width="1.5"/>
+          <rect x="6" y="20" width="20" height="16" rx="3" fill="#2b3140" stroke="#5a6478" stroke-width="1.5"/>
+          <rect x="30" y="6" width="8" height="28" rx="3" fill="#9a8c74"/>
         </svg>
         <div class="leg-txt"><b>V e7</b> — mur vertical à droite des cases e7 et e8</div>
       </div>
-      <div class="leg-note">Blanc = PV numérotée · Or = meilleurs coups (1-5)</div>
+      <div class="leg-note">Blanc = PV numérotée · Or = meilleurs coups (cliquables)</div>
     </div>
+    <details id="heuristics" class="heur">
+      <summary>Heuristiques · MCTS · Éval statique</summary>
+      <div id="heur-body" class="heur-body"></div>
+    </details>
   </div>
+
+  <div id="match" class="hidden">
+    <div class="anal-head">
+      <span class="anal-title">Match</span>
+      <span id="match-status"></span>
+      <button id="btn-match-stop" class="small">Stop</button>
+    </div>
+    <div id="match-results"></div>
+  </div>
+
   <pre id="debug" class="hidden"></pre>
   <p id="hint"></p>
 </div>
@@ -86,6 +123,7 @@
         <option value="pvp">Player vs Player</option>
         <option value="ai">vs AI</option>
         <option value="ai2">AI vs AI</option>
+        <option value="match">Bot vs Bot (match)</option>
       </select>
     </div>
     <div class="field" id="m-engine-f">
@@ -98,6 +136,18 @@
         <option value="1">P1</option>
         <option value="0">P2</option>
       </select>
+    </div>
+    <div class="field hidden" id="m-match-f">
+      <label for="m-p1">Engine P1</label>
+      <select id="m-p1"></select>
+      <label for="m-p2" class="mt">Engine P2</label>
+      <select id="m-p2"></select>
+      <label for="m-mtime" class="mt">Seconds per move</label>
+      <input id="m-mtime" type="number" min="0.05" step="0.05" value="1">
+      <label for="m-mdepth" class="mt">Search depth</label>
+      <input id="m-mdepth" type="number" min="1" max="30" value="10">
+      <label for="m-mgames" class="mt">Number of games</label>
+      <input id="m-mgames" type="number" min="1" max="20" value="1">
     </div>
     <div class="field">
       <label for="m-time">Time per player (s, 0 = none)</label>

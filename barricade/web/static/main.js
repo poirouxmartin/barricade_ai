@@ -21,6 +21,8 @@ let debugOn = false;
 let aiBusy = false;
 let pendingAiAt = null;         // timestamp to fire the delayed AI move
 let clockAnchorAt = 0;          // performance.now() when current state was received
+let spent = [0, 0];             // accumulated seconds per player (count-up mode)
+let turnStartedAt = 0;          // performance.now() when the current turn began
 let engines = {};
 
 const key = p => p[0] + ',' + p[1];
@@ -73,9 +75,13 @@ function legalWall(w) {
 }
 
 function adopt(s) {
+  if (state && !state.time_left && !state.game_over && s.turn !== state.turn) {
+    spent[state.turn] += (performance.now() - turnStartedAt) / 1000;
+  }
   state = s;
   selected = null;
   clockAnchorAt = performance.now();
+  if (!s.time_left) turnStartedAt = performance.now();
   updateDebug();
   if (isAiTurn()) pendingAiAt = performance.now() + AI_DELAY;
 }
@@ -124,8 +130,15 @@ canvas.addEventListener('click', async e => {
 
 async function doAiMove() {
   aiBusy = true;
+  const poll = setInterval(async () => {
+    try {
+      const info = await api('/api/info');
+      if (info && info.thinking) updateDebugFromInfo(info);
+    } catch (_) { /* keep polling */ }
+  }, 200);
   const prev = state;
   const res = await api('/api/ai', {});
+  clearInterval(poll);
   aiBusy = false;
   if (!res || res.error) { state = prev; render(); return; }
   adopt(res);
@@ -144,7 +157,7 @@ const sideF = document.getElementById('m-side-f');
 
 function populateEngineSelect() {
   engineSel.innerHTML = '';
-  const list = engines.list || ['greedy'];
+  const list = engines.engines || ['greedy'];
   for (const name of list) {
     const opt = document.createElement('option');
     opt.value = name;
@@ -182,6 +195,8 @@ document.getElementById('m-start').addEventListener('click', async () => {
   const state2 = await startNew(mode2, aiPlayer, engine, tc || null);
   if (!state2 || state2.error) return;
   if (flipInp.checked) flip = true;
+  spent = [0, 0];
+  turnStartedAt = performance.now();
   display = state2.positions.map(p => [p[0], p[1]]);
   adopt(state2);
 });
@@ -211,6 +226,16 @@ function updateDebug() {
   }
   if (state.last_action) lines.push('Last move: ' + JSON.stringify(state.last_action));
   debugEl.textContent = lines.join('\n') || 'No info yet.';
+}
+
+function updateDebugFromInfo(info) {
+  if (!debugOn) return;
+  debugEl.classList.remove('hidden');
+  const lines = ['Engine: ' + (info.engine || '?') + '  (thinking…)'];
+  if (info.progress && Object.keys(info.progress).length) {
+    lines.push(Object.entries(info.progress).map(([k, v]) => k + ': ' + v).join('  ·  '));
+  }
+  debugEl.textContent = lines.join('\n');
 }
 
 // ----- rendering -----
@@ -356,8 +381,15 @@ function fmtClock(t) {
 }
 
 function updateClocks(now) {
-  if (!state || !state.time_left) {
-    clockEls.forEach(el => { el.textContent = ''; });
+  if (!state) return;
+  if (!state.time_left) {
+    // count-up mode: show each side's accumulated move time
+    const el = (now - turnStartedAt) / 1000;
+    for (let i = 0; i < 2; i++) {
+      const t = spent[i] + (!state.game_over && state.turn === i ? el : 0);
+      clockEls[i].textContent = fmtClock(t);
+      clockEls[i].classList.toggle('low', false);
+    }
     return;
   }
   const elapsed = (now - clockAnchorAt) / 1000;
@@ -426,5 +458,6 @@ function startNew(mode2, aiPlayer, engine, timeControl) {
   state = await api('/api/state');
   display = state.positions.map(p => [p[0], p[1]]);
   adopt(state);
+  openMenu();   // ask for the game type before playing
   requestAnimationFrame(tick);
 })();

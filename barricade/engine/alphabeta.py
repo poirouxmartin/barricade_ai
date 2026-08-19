@@ -44,6 +44,7 @@ class AlphaBetaEngine(Engine):
         self.nodes = 0
         self.deadline = 0.0
         self.last_info = {}
+        self.progress = {}
         self.buf = [0] * 81  # scratch distance field, reused per node
 
     def choose_move(self, game):
@@ -59,6 +60,7 @@ class AlphaBetaEngine(Engine):
                 break
             best, score = scored
             self.last_info = {"depth": depth, "nodes": self.nodes, "score": score}
+            self.progress = dict(self.last_info)
         return best
 
     # ----- search -----

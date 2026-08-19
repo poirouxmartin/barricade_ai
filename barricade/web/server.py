@@ -42,6 +42,7 @@ class App:
         self.mode = "pvp"
         self.engine_name = None
         self.engine_info = None
+        self.thinking = False
         self.depth = depth
         self.time_limit = time_limit
         self.engine = self._make_engine(DEFAULT_ENGINE)
@@ -104,6 +105,8 @@ class App:
     def play(self, move):
         def _play():
             try:
+                if self.thinking:
+                    return None, "AI thinking"
                 if move[0] == "move":
                     self.game.apply(("move", tuple(move[1])))
                 elif move[0] == "wall":
@@ -117,18 +120,41 @@ class App:
 
     def ai_move(self):
         def _ai():
-            if self.ai_player is None:
-                return None, "AI not active"
-            if self.game.winner is not None:
-                return None, "game over"
-            if self.ai_player != "both" and self.game.turn != self.ai_player:
-                return None, "not AI turn"
-            self._set_engine_time(self.game.turn)
-            self.game.apply(self.engine.choose_move(self.game))
-            info = getattr(self.engine, "last_info", None)
-            self.engine_info = {"engine": self.engine_name, "info": info}
+            with self.lock:
+                if self.ai_player is None:
+                    return None, "AI not active"
+                if self.game.winner is not None:
+                    return None, "game over"
+                if self.ai_player != "both" and self.game.turn != self.ai_player:
+                    return None, "not AI turn"
+                if self.thinking:
+                    return None, "AI busy"
+                self.thinking = True
+                self.engine_info = None
+                self._set_engine_time(self.game.turn)
+            try:
+                # search runs without the lock so /api/state and /api/info stay responsive
+                action = self.engine.choose_move(self.game)
+            finally:
+                with self.lock:
+                    self.thinking = False
+            if action is None:
+                return None, "no move"
+            with self.lock:
+                try:
+                    self.game.apply(action)
+                except ValueError as e:
+                    return None, str(e)
+                info = getattr(self.engine, "last_info", None)
+                self.engine_info = {"engine": self.engine_name, "info": info}
             return self.state(), None
-        return self._with_lock(_ai)
+        return _ai()
+
+    def info(self):
+        """Cheap, lock-free: live search progress while the AI thinks."""
+        return {"thinking": self.thinking,
+                "engine": self.engine_name,
+                "progress": getattr(self.engine, "progress", None)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -171,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(Handler.app.state())
         elif path == "/api/meta":
             self._json(Handler.app.meta())
+        elif path == "/api/info":
+            self._json(Handler.app.info())
         else:
             self._json({"error": "not found"}, 404)
 

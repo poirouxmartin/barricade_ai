@@ -36,6 +36,7 @@ class KernelEngine(Engine):
         self.tt_m = np.zeros(tt_size, np.int64)
         self.budget = np.zeros(1, np.int64)
         self.last_info = {}
+        self.progress = {}
         self._warm = False
         self.nps_est = 300_000.0  # smoothed nodes/s across depths and moves
 
@@ -74,6 +75,7 @@ class KernelEngine(Engine):
             dt = max(time.time() - t0, 1e-6)
             used = max(0, allowance - int(self.budget[0]))
             total_nodes += used
+            self.progress = {"depth": depth, "nodes": total_nodes, "score": int(score)}
             if used > 100 and dt > 0.03:
                 instant = used / dt
                 instant = min(max(instant, 50_000.0), 5_000_000.0)

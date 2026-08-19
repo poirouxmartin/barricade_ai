@@ -253,6 +253,7 @@ class MctsEngine(Engine):
         self.next_ch = np.zeros(1, np.int64)
         self.ips_est = 10_000.0  # smoothed iterations/s
         self.last_info = {}
+        self.progress = {}
         self._warm = False
 
     def _warmup(self):
@@ -297,6 +298,7 @@ class MctsEngine(Engine):
                      self.n_nodes, self.next_ch, self.zob)
             dt = max(time.time() - t0, 1e-6)
             total_iters += allowance
+            self.progress = {"iterations": total_iters, "nodes": int(self.n_nodes[0])}
             if dt > 0.03:
                 instant = allowance / dt
                 instant = min(max(instant, 1000.0), 1_000_000.0)

@@ -25,16 +25,17 @@ class KernelEngine(Engine):
     def __init__(self, max_depth=12, time_limit=2.0, tt_size=1 << 20):
         if not _HAS_NUMBA:
             raise ImportError("numba is required for KernelEngine")
+        self.kernel = kernel
         self.max_depth = max_depth
         self.time_limit = time_limit
         self.tt_size = tt_size
-        self.zob = kernel.make_zobrist()
+        self.zob = self.kernel.make_zobrist()
         self.tt_k = np.zeros(tt_size, np.int64)
         self.tt_v = np.zeros(tt_size, np.int64)
         self.tt_d = np.zeros(tt_size, np.int64)
         self.tt_f = np.zeros(tt_size, np.int64)
         self.tt_m = np.zeros(tt_size, np.int64)
-        self.killers = np.zeros(2 * kernel.MAX_PLY, np.int64)
+        self.killers = np.zeros(2 * self.kernel.MAX_PLY, np.int64)
         self.budget = np.zeros(1, np.int64)
         self.stop = np.zeros(1, np.int64)
         self.out_moves = np.zeros(64, np.int64)
@@ -43,16 +44,18 @@ class KernelEngine(Engine):
         self.progress = {}
         self._warm = False
         self.nps_est = 300_000.0  # smoothed nodes/s across depths and moves
+        self.REP_WINDOW = 12  # plies; a key seen again inside this window is a repetition
 
     def _warmup(self):
         if self._warm:
             return
         self._warm = True
         from barricade.game import Barricade
-        st = kernel.make_state(Barricade(), self.zob)
-        kernel.search_depth(st, 2, -1, 0, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
-                            self.tt_m, self.killers, self.zob, self.budget, self.stop,
-                            self.out_moves, self.out_scores, 0)
+        st = self.kernel.make_state(Barricade(), self.zob)
+        self.kernel.search_depth(st, 2, -1, 0, self.tt_k, self.tt_v, self.tt_d,
+                                 self.tt_f, self.tt_m, self.killers, self.zob,
+                                 self.budget, self.stop, self.out_moves,
+                                 self.out_scores, 0)
 
     def choose_move(self, game):
         self._warmup()
@@ -62,12 +65,16 @@ class KernelEngine(Engine):
         self.tt_f[:] = 0
         self.tt_m[:] = 0
         self.killers[:] = 0
-        st = kernel.make_state(game, self.zob)
+        st = self.kernel.make_state(game, self.zob)
+        recent = self._recent_keys(game)
         deadline = time.time() + self.time_limit
         best = random.choice(game.legal_actions())
         hint = -1
         prev_score = 0
         total_nodes = 0
+        best_action = -1
+        best_depth = 0
+        best_n = 0
         for depth in range(1, self.max_depth + 1):
             remaining = deadline - time.time()
             if remaining <= 0:
@@ -75,10 +82,10 @@ class KernelEngine(Engine):
             allowance = int(remaining * self.nps_est) + 1000
             self.budget[0] = allowance
             t0 = time.time()
-            action, score, aborted, _out_n = kernel.search_depth(
-                st, depth, hint, prev_score, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
-                self.tt_m, self.killers, self.zob, self.budget, self.stop,
-                self.out_moves, self.out_scores, 0)
+            action, score, aborted, out_n = self.kernel.search_depth(
+                st, depth, hint, prev_score, self.tt_k, self.tt_v, self.tt_d,
+                self.tt_f, self.tt_m, self.killers, self.zob, self.budget,
+                self.stop, self.out_moves, self.out_scores, 1)
             dt = max(time.time() - t0, 1e-6)
             used = max(0, allowance - int(self.budget[0]))
             total_nodes += used
@@ -90,9 +97,58 @@ class KernelEngine(Engine):
             if aborted:
                 break
             if action >= 0:
-                best = kernel.decode_action(action)
+                best_action = action
+                best_depth = depth
+                best_n = out_n
                 hint = action
                 prev_score = int(score)
             self.last_info = {"depth": depth, "nodes": total_nodes,
                               "score": int(score)}
+        if best_action >= 0:
+            best = self._guard_repetition(st, best_action, best_depth, best_n, recent)
         return best
+
+    def _recent_keys(self, game):
+        """Zobrist keys of the last REP_WINDOW positions (current included),
+        reconstructed by replaying game.history."""
+        from barricade.game import Barricade
+
+        k = self.kernel
+        g = Barricade()
+        st = k.make_state(g, self.zob)
+        keys = []
+        for kind, _player, arg in game.history:
+            if kind == "move":
+                st = k.apply_move(st, arg[0] * 9 + arg[1], self.zob)
+            else:
+                ori, r, c = arg
+                ob = 0 if ori == "H" else 1
+                st = k.apply_wall(st, k.WALL_BASE + ob * 64 + r * 8 + c, self.zob)
+            keys.append(st[14])
+        if len(keys) <= self.REP_WINDOW:
+            return set(keys)
+        return set(keys[-self.REP_WINDOW:])
+
+    def _repeats(self, st, action, recent):
+        k = self.kernel
+        if action < k.WALL_BASE:
+            child = k.apply_move(st, action, self.zob)
+        else:
+            child = k.apply_wall(st, action, self.zob)
+        return child[14] in recent
+
+    def _guard_repetition(self, st, action, depth, n_total, recent):
+        """If the chosen move would repeat a recent position, re-pick the best
+        ranked root move that does not repeat. Prevents shuffle lockups."""
+        k = self.kernel
+        if not self._repeats(st, action, recent):
+            return k.decode_action(action)
+        n = k.root_top_moves(st, depth, self.tt_k, self.tt_v, self.tt_d,
+                             self.tt_f, self.tt_m, self.killers, self.zob,
+                             self.budget, self.stop, self.out_moves,
+                             self.out_scores, n_total, min(n_total, 8))
+        for i in range(n):
+            a = self.out_moves[i]
+            if a >= 0 and not self._repeats(st, a, recent):
+                return k.decode_action(a)
+        return k.decode_action(action)

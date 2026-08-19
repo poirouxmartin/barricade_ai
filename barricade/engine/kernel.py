@@ -57,6 +57,8 @@ MAX_PLY = 64  # killer-move table depth (plies)
 DIST_W = 4
 CONF_W = 0.12  # opponent-wall discount: conf = max(1 - CONF_W * opp_w, CONF_FLOOR)
 CONF_FLOOR = 0.3
+TEMPO = np.int64(2)     # bonus for the side to move
+DETOUR_W = np.int64(2)  # obstruction term weight (extra plies forced by walls)
 
 # ---- zobrist layout -------------------------------------------------------
 ZB_POS1 = 81
@@ -397,24 +399,28 @@ def gen_walls(st, my, opp, out, cap):
 def eval_fn(st):
     """Static score from the perspective of the side to move.
 
-    The opponent's remaining walls scale how much we trust our distance lead:
-    with zero walls left they can never lengthen our path (the lead is fully
-    trusted), with many left the lead is discounted. A deficit is never
-    discounted: falling behind stays dangerous, which keeps the engine from
-    walking into traps. Wall parity (my_w - opp_w) is a small bonus.
+    Distance advantage scaled by how much we trust it given the opponent's
+    remaining walls (deficit never discounted). Plus obstruction: who is
+    actually more detoured by walls, measured by (BFS distance - manhattan
+    ideal) for each side. Plus a small tempo bonus for the side to move.
     """
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     d0 = flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO)
     d1 = flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO)
     if turn == 0:
         my_d, opp_d, my_w, opp_w = d0, d1, wl0, wl1
+        my_p, opp_p = pos0, pos1
     else:
         my_d, opp_d, my_w, opp_w = d1, d0, wl1, wl0
+        my_p, opp_p = pos1, pos0
+    m_my = (my_p // 9 if turn == 0 else 8 - my_p // 9) + abs(my_p % 9 - 4)
+    m_opp = (opp_p // 9 if turn != 0 else 8 - opp_p // 9) + abs(opp_p % 9 - 4)
     dist_adv = (opp_d - my_d) * DIST_W
     if dist_adv > 0:
         conf = max(1.0 - CONF_W * opp_w, CONF_FLOOR)
         dist_adv = np.int64(dist_adv * conf)
-    return dist_adv + (my_w - opp_w)
+    obstruction = (opp_d - m_opp) - (my_d - m_my)
+    return dist_adv + (my_w - opp_w) + TEMPO + DETOUR_W * obstruction
 
 
 # ---- state transitions ----------------------------------------------------
@@ -857,7 +863,8 @@ def make_zobrist(seed=42):
 
 
 def decode_action(action):
-    """Kernel action int -> game action tuple."""
+    """Kernel action int -> game action tuple (always plain Python ints)."""
+    action = int(action)
     if action < 81:
         r, c = divmod(action, 9)
         return ("move", (r, c))

@@ -51,6 +51,7 @@ let engines = {};
 let analysisTimer = null;
 let analysisState = null;
 let view = null;                // reviewed snapshot, null = live position
+let matchView = null;           // live snapshot of a running bot match
 let navIndex = null;
 let historySnapshots = [];
 let matchTimer = null;
@@ -146,7 +147,7 @@ function resetView() {
 
 function updateNav() {
   const count = historySnapshots.length;
-  navEl.classList.toggle('hidden', count === 0);
+  navEl.classList.toggle('hidden', matchView !== null || count === 0);
   if (count === 0) { navListEl.innerHTML = ''; return; }
   const idx = navIndex === null ? count - 1 : navIndex;
   navPosEl.textContent = (navIndex === null ? count - 1 : navIndex) + '/' + (count - 1);
@@ -198,12 +199,25 @@ document.getElementById('nav-live').addEventListener('click', () => {
   goNav(historySnapshots.length - 1);
 });
 
+// arrow-key navigation across the game
+document.addEventListener('keydown', e => {
+  const tag = (e.target.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (matchView || historySnapshots.length === 0) return;
+  const last = historySnapshots.length - 1;
+  const idx = navIndex === null ? last : navIndex;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); if (idx > 0) goNav(idx - 1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); if (idx < last) goNav(idx + 1); }
+  else if (e.key === 'Home') { e.preventDefault(); goNav(0); }
+  else if (e.key === 'End') { e.preventDefault(); goNav(last); }
+});
+
 // ----- interaction -----
 
 canvas.addEventListener('mousemove', e => {
   hoverWall = null;
   hoverCell = null;
-  if (!state || view || !isHumanTurn()) return;
+  if (!state || view || matchView || !isHumanTurn()) return;
   const [mx, my] = mousePos(e);
   const w = wallFromMouse(mx, my);
   hoverWall = (w && w.d <= 14) ? w : null;
@@ -213,7 +227,7 @@ canvas.addEventListener('mousemove', e => {
 canvas.addEventListener('mouseleave', () => { hoverWall = null; hoverCell = null; });
 
 canvas.addEventListener('click', async e => {
-  if (!state || view || state.game_over || !isHumanTurn()) return;
+  if (!state || view || matchView || state.game_over || !isHumanTurn()) return;
   const [mx, my] = mousePos(e);
 
   if (hoverWall) {
@@ -644,7 +658,12 @@ async function startMatch() {
 async function pollMatch() {
   const m = await api('/api/match/state');
   if (m && m.running !== undefined) renderMatch(m);
-  if (m && !m.running && matchState && matchState.running) {
+  if (m && m.running && m.snapshot) {
+    matchView = m.snapshot;
+    display = matchView.positions.map(p => [p[0], p[1]]);
+  }
+  if (m && !m.running && (matchState && matchState.running || matchView)) {
+    matchView = null;
     clearInterval(matchTimer);
     matchTimer = null;
     const st = await api('/api/state');
@@ -654,6 +673,8 @@ async function pollMatch() {
     }
   }
   matchState = m;
+  render();
+  updateNav();
 }
 
 function renderMatch(m) {
@@ -715,7 +736,7 @@ function wallCenter(ori, r, c) {
 function drawAnalysisOverlay() {
   const a = analysisState;
   if (!a || !a.pv || !a.pv.length) return;
-  if (view || !positionMatches(a)) return;
+  if (view || matchView || !positionMatches(a)) return;
 
   // PV: numbered arrows/badges + wall heads, following the analyzed position
   const pos = a.positions.map(p => [p[0], p[1]]);
@@ -770,8 +791,8 @@ function labelPos(bx, by) {
 function drawCoordinates() {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = 'rgba(232,236,241,0.55)';
-  ctx.font = '11px ui-monospace, Consolas, monospace';
+  ctx.fillStyle = 'rgba(240,244,252,0.9)';
+  ctx.font = '600 13px ui-monospace, Consolas, monospace';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   for (let c = 0; c < N; c++) {
     const [sx, sy] = labelPos(c * CELL + CELL / 2, BOARD);
@@ -795,7 +816,7 @@ function roundRectPath(x, y, w, h, r) {
 }
 
 function render() {
-  const s = view || state;
+  const s = matchView || view || state;
   if (!s) return;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, W, H);
@@ -833,24 +854,21 @@ function render() {
   drawWallSet(s.h_walls, 'H');
   drawWallSet(s.v_walls, 'V');
 
-  // always-visible hints for the player to move
-  if (!s.game_over && !view && isHumanTurn()) {
-    for (const [ori, r, c] of s.legal_walls) {
-      drawWall(ori, r, c, 'rgba(60,180,60,0.12)');
-    }
+  // always-visible hints for the player to move (legal moves only)
+  if (!s.game_over && !view && !matchView && isHumanTurn()) {
     for (const [r, c] of s.legal_moves) {
       dot(c * CELL + CELL / 2, r * CELL + CELL / 2,
-          selected && selected === key([r, c]) ? 'rgba(46,170,70,0.95)' : 'rgba(46,170,70,0.45)',
-          selected && selected === key([r, c]) ? 9 : 7);
+          selected && selected === key([r, c]) ? 'rgba(64,220,180,0.9)' : 'rgba(64,220,180,0.28)',
+          selected && selected === key([r, c]) ? 9 : 6);
     }
   }
 
   // hover feedback
-  if (!view && hoverWall) drawWall(hoverWall.ori, hoverWall.r, hoverWall.c, 'rgba(46,170,70,0.85)');
-  if (!view && hoverCell && !hoverWall) {
+  if (!view && !matchView && hoverWall) drawWall(hoverWall.ori, hoverWall.r, hoverWall.c, 'rgba(64,220,180,0.5)');
+  if (!view && !matchView && hoverCell && !hoverWall) {
     const [r, c] = hoverCell;
     if (s.legal_moves.some(m => key(m) === key([r, c]))) {
-      ctx.fillStyle = 'rgba(46,170,70,0.18)';
+      ctx.fillStyle = 'rgba(64,220,180,0.12)';
       ctx.fillRect(c * CELL + 3, r * CELL + 3, CELL - 6, CELL - 6);
     }
   }
@@ -947,14 +965,20 @@ function updateClocks(now) {
 }
 
 function updateHud() {
-  const s = view || state;
+  const s = matchView || view || state;
   if (!s) return;
   document.getElementById('w0').textContent = s.walls_left[0] + ' w';
   document.getElementById('w1').textContent = s.walls_left[1] + ' w';
   document.getElementById('p0').classList.toggle('active', !s.game_over && s.turn === 0);
   document.getElementById('p1').classList.toggle('active', !s.game_over && s.turn === 1);
 
-  if (view) {
+  if (matchView) {
+    const m = matchState || {};
+    statusEl.textContent = 'Match ' + (m.p1 || '') + ' vs ' + (m.p2 || '')
+      + ' — partie ' + (m.current || 0) + '/' + (m.games || 0)
+      + ' · coup ' + (m.ply || 0);
+    hintEl.textContent = 'Partie de bots en cours…';
+  } else if (view) {
     statusEl.textContent = 'Reviewing move ' + navIndex + ' / ' + (historySnapshots.length - 1);
     hintEl.textContent = 'Click "Live" to resume playing.';
   } else if (s.game_over) {
@@ -972,7 +996,7 @@ function updateHud() {
 // ----- main loop -----
 
 function animate() {
-  if (!state || view) return;
+  if (!state || view || matchView) return;
   state.positions.forEach((p, i) => {
     const t = display[i];
     t[0] += (p[0] - t[0]) * 0.18;
@@ -985,7 +1009,7 @@ function animate() {
 function tick(now) {
   animate();
   updateClocks(now);
-  if (!view && isAiTurn() && pendingAiAt !== null && now >= pendingAiAt) {
+  if (!view && !matchView && isAiTurn() && pendingAiAt !== null && now >= pendingAiAt) {
     pendingAiAt = null;
     doAiMove();
   }

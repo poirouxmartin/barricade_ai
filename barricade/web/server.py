@@ -306,6 +306,7 @@ class App:
                 "current": 0, "ply": 0, "moves": [], "results": [],
                 "score": [0, 0], "draws": 0, "status": "starting",
                 "error": None,
+                "snapshot": self._snapshot_of(Barricade()),
             }
             self._match_stop = threading.Event()
             self._match_thread = threading.Thread(
@@ -325,6 +326,7 @@ class App:
                     self.match["current"] = gi + 1
                     self.match["ply"] = 0
                     self.match["status"] = f"partie {gi + 1}/{games}"
+                    self.match["snapshot"] = self._snapshot_of(g)
                 ply = 0
                 while g.winner is None and ply < MATCH_MAX_PLIES and not self._match_stop.is_set():
                     eng = ea if g.turn == 0 else eb
@@ -347,6 +349,7 @@ class App:
                     ply += 1
                     with self.lock:
                         self.match["ply"] = ply
+                        self.match["snapshot"] = self._snapshot_of(g)
                 if self._match_stop.is_set():
                     break
                 with self.lock:

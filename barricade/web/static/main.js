@@ -155,16 +155,26 @@ const flipInp = document.getElementById('m-flip');
 const engineF = document.getElementById('m-engine-f');
 const sideF = document.getElementById('m-side-f');
 
+const ENGINE_LABELS = {
+  kernel: 'kernel (compiled — fast)',
+  alphabeta: 'alphabeta (Python — slow)',
+  mcts: 'mcts (experimental)',
+  greedy: 'greedy',
+  random: 'random',
+};
+const ENGINE_ORDER = ['kernel', 'alphabeta', 'greedy', 'mcts', 'random'];
+
 function populateEngineSelect() {
   engineSel.innerHTML = '';
-  const list = engines.engines || ['greedy'];
-  for (const name of list) {
+  const avail = new Set(engines.engines || ['greedy']);
+  for (const name of ENGINE_ORDER) {
+    if (!avail.has(name)) continue;
     const opt = document.createElement('option');
     opt.value = name;
-    opt.textContent = name;
+    opt.textContent = ENGINE_LABELS[name] || name;
     engineSel.appendChild(opt);
   }
-  if (engines.default) engineSel.value = engines.default;
+  if (engines.default && avail.has(engines.default)) engineSel.value = engines.default;
 }
 
 function openMenu() {

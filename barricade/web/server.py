@@ -225,7 +225,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host="127.0.0.1", port=8000, depth=8, time_limit=2.0):
-    Handler.app = App(depth=depth, time_limit=time_limit)
+    app = App(depth=depth, time_limit=time_limit)
+    Handler.app = app
+    # compile numba once at startup so the first AI move is not slowed down
+    if hasattr(app.engine, "_warmup"):
+        app.engine._warmup()
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"Barricade on http://{host}:{port}  (AI: depth {depth}, {time_limit}s)")
     httpd.serve_forever()

@@ -34,6 +34,7 @@ class KernelEngine(Engine):
         self.tt_d = np.zeros(tt_size, np.int64)
         self.tt_f = np.zeros(tt_size, np.int64)
         self.tt_m = np.zeros(tt_size, np.int64)
+        self.killers = np.zeros(2 * kernel.MAX_PLY, np.int64)
         self.budget = np.zeros(1, np.int64)
         self.last_info = {}
         self.progress = {}
@@ -47,7 +48,7 @@ class KernelEngine(Engine):
         from barricade.game import Barricade
         st = kernel.make_state(Barricade(), self.zob)
         kernel.search_depth(st, 2, -1, 0, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
-                            self.tt_m, self.zob, self.budget)
+                            self.tt_m, self.killers, self.zob, self.budget)
 
     def choose_move(self, game):
         self._warmup()
@@ -56,6 +57,7 @@ class KernelEngine(Engine):
         self.tt_d[:] = 0
         self.tt_f[:] = 0
         self.tt_m[:] = 0
+        self.killers[:] = 0
         st = kernel.make_state(game, self.zob)
         deadline = time.time() + self.time_limit
         best = random.choice(game.legal_actions())
@@ -71,7 +73,7 @@ class KernelEngine(Engine):
             t0 = time.time()
             action, score, aborted = kernel.search_depth(
                 st, depth, hint, prev_score, self.tt_k, self.tt_v, self.tt_d, self.tt_f,
-                self.tt_m, self.zob, self.budget)
+                self.tt_m, self.killers, self.zob, self.budget)
             dt = max(time.time() - t0, 1e-6)
             used = max(0, allowance - int(self.budget[0]))
             total_nodes += used

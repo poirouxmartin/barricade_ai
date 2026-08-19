@@ -104,6 +104,7 @@ button.small { padding: 3px 10px; font-size: 12px; }
   border-radius: 5px; min-width: 4px;
 }
 .top-val { width: 90px; flex-shrink: 0; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.anal-legend { margin-top: 8px; font-size: 11px; color: var(--muted); opacity: .8; }
 
 @keyframes blink { 50% { opacity: .4; } }
 

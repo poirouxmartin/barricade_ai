@@ -66,6 +66,23 @@ class AnalysisSessionTest(unittest.TestCase):
         self.assertFalse(s.running)
         self.assertFalse(s.state()["running"])
 
+    def test_stop_during_deep_search_is_immediate(self):
+        # the kernel must release the GIL (nogil) so stop() can interrupt the
+        # in-flight search at the next node instead of running the budget out
+        s = self._session([("move", (7, 4)), ("move", (1, 4))])
+        s.start()
+        deadline = time.time() + 60
+        st = s.state()
+        while time.time() < deadline and st["depth"] < 8:
+            time.sleep(0.2)
+            st = s.state()
+        self.assertGreaterEqual(st["depth"], 8)
+        t0 = time.time()
+        s.stop()
+        s._thread.join(timeout=2.0)
+        self.assertFalse(s._thread.is_alive(), "analysis thread did not stop promptly")
+        self.assertLess(time.time() - t0, 2.0)
+
     def test_pv_legality(self):
         g = Barricade()
         g.apply(("move", (7, 4)), check=False)

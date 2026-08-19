@@ -30,6 +30,7 @@ class AnalysisSession:
         self.max_depth = max_depth
         self.top_moves_n = top_moves
         self._stop = threading.Event()
+        self._stop_flag = np.zeros(1, np.int64)
         self._lock = threading.Lock()
         self._thread = None
         self._out = np.zeros(64, np.int64)
@@ -50,12 +51,14 @@ class AnalysisSession:
         if self.running:
             return
         self._stop.clear()
+        self._stop_flag[0] = 0
         self.running = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
+        self._stop_flag[0] = 1
         self.running = False
 
     def state(self):
@@ -71,6 +74,9 @@ class AnalysisSession:
                 "pv": self.pv,
                 "top_moves": self.top,
                 "turn": self.game.turn,
+                "positions": self.game.positions,
+                "h_walls": sorted(self.game.h_walls),
+                "v_walls": sorted(self.game.v_walls),
                 "error": self.error,
             }
 
@@ -80,6 +86,10 @@ class AnalysisSession:
         if abs(score) > kernel.MATE - 1000:
             return 1.0 if score > 0 else 0.0
         return 1.0 / (1.0 + math.exp(-score / WIN_K))
+
+    def _consume(self):
+        """Nodes consumed by the last search (budget was reset to NODE_BUDGET)."""
+        return NODE_BUDGET - max(0, int(self._engine.budget[0]))
 
     def _run(self):
         try:
@@ -92,17 +102,19 @@ class AnalysisSession:
             depth = 0
             best_move = None
             while not self._stop.is_set() and depth < self.max_depth:
+                if self._stop.is_set():
+                    break
                 depth += 1
                 self._engine.budget[0] = NODE_BUDGET
-                a, s, ab = kernel.search_depth(
+                a, s, ab, out_n = kernel.search_depth(
                     st, depth, hint, prev,
                     self._engine.tt_k, self._engine.tt_v, self._engine.tt_d,
                     self._engine.tt_f, self._engine.tt_m, self._engine.killers,
-                    self._engine.zob, self._engine.budget)
+                    self._engine.zob, self._engine.budget, self._stop_flag,
+                    self._out, self._out_scores, 1)
+                total += self._consume()
                 if ab:
                     break
-                used = max(0, NODE_BUDGET - int(self._engine.budget[0]))
-                total += used
                 if a >= 0:
                     hint = a
                     prev = int(s)
@@ -114,12 +126,16 @@ class AnalysisSession:
                         st, depth,
                         self._engine.tt_k, self._engine.tt_v, self._engine.tt_d,
                         self._engine.tt_f, self._engine.tt_m, self._engine.killers,
-                        self._engine.zob, self._engine.budget,
-                        self._out, self._out_scores)
+                        self._engine.zob, self._engine.budget, self._stop_flag,
+                        self._out, self._out_scores, out_n, min(self.top_moves_n, 8))
+                    total += self._consume()
                 top = [{"move": kernel.decode_action(int(self._out[i])),
                         "score": int(self._out_scores[i])}
                        for i in range(min(n, self.top_moves_n))]
-                pv = self._extract_pv(best_move)
+                if top and top[0]["move"] != best_move:
+                    best_move = top[0]["move"]  # exact score may refine the best
+                pv, spent = self._extract_pv(best_move)
+                total += spent
                 with self._lock:
                     self.depth = depth
                     self.score = int(s)
@@ -137,6 +153,7 @@ class AnalysisSession:
 
     def _extract_pv(self, best_move):
         pv = [best_move] if best_move else []
+        spent = 0
         g = self.game.clone()
         if best_move is not None:
             g.apply(best_move, check=False)
@@ -151,10 +168,12 @@ class AnalysisSession:
             else:
                 # entry evicted: refresh this node with a shallow search
                 self._engine.budget[0] = NODE_BUDGET
-                m, _, ab = kernel.search_depth(
+                m, _, ab, _out_n = kernel.search_depth(
                     st, PV_REFRESH_DEPTH, -1, 0,
                     tt_k, self._engine.tt_v, self._engine.tt_d, self._engine.tt_f,
-                    tt_m, self._engine.killers, self._engine.zob, self._engine.budget)
+                    tt_m, self._engine.killers, self._engine.zob, self._engine.budget,
+                    self._stop_flag, self._out, self._out_scores, 0)
+                spent += self._consume()
                 if ab or m < 0:
                     break
             act = kernel.decode_action(m)
@@ -164,4 +183,4 @@ class AnalysisSession:
             g.apply(act, check=False)
             if g.winner is not None:
                 break
-        return pv
+        return pv, spent

@@ -31,6 +31,7 @@ let spent = [0, 0];             // accumulated seconds per player (count-up mode
 let turnStartedAt = 0;          // performance.now() when the current turn began
 let engines = {};
 let analysisTimer = null;
+let analysisState = null;
 
 const key = p => p[0] + ',' + p[1];
 
@@ -268,11 +269,13 @@ function updateDebugFromInfo(info) {
 
 // ----- analysis -----
 
+const FILES = 'abcdefghi';
+function cellName(r, c) { return FILES[c] + (9 - r); }   // a1 = bottom-left (P1), i9 = top-right (P2)
 function fmtMove(m) {
   if (!m) return '—';
   const [kind, arg] = m;
-  if (kind === 'move') return 'Move ' + arg[0] + ':' + arg[1];
-  return 'Wall ' + arg[0] + ' ' + arg[1] + ':' + arg[2];
+  if (kind === 'move') return cellName(arg[0], arg[1]);
+  return arg[0] + ' ' + cellName(arg[1], arg[2]);
 }
 
 function winPct(score) {
@@ -309,6 +312,7 @@ function renderAnalysis(a) {
     analStatusEl.textContent = a && a.error ? 'Error: ' + a.error : '…';
     return;
   }
+  analysisState = a;
   const frozen = state && state.turn !== a.turn ? ' · position figée' : '';
   analStatusEl.textContent = (a.running ? 'searching' : 'stopped') + frozen;
   if (a.running) analStatusEl.classList.add('pulse');
@@ -364,6 +368,92 @@ function renderAnalysis(a) {
 }
 
 // ----- rendering -----
+
+function badge(x, y, text, bg, fg) {
+  ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2);
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = '#222'; ctx.stroke();
+  ctx.fillStyle = fg || '#111'; ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y + 0.5);
+}
+
+function arrow(x1, y1, x2, y2, color) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 4) return;
+  const ux = dx / len, uy = dy / len;
+  const a1 = Math.atan2(dy, dx);
+  ctx.strokeStyle = color; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x1 + ux * 26, y1 + uy * 26); ctx.lineTo(x2 - ux * 16, y2 - uy * 16); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x2 - ux * 16, y2 - uy * 16);
+  ctx.lineTo(x2 - ux * 16 - 8 * Math.cos(a1 - 0.45), y2 - uy * 16 - 8 * Math.sin(a1 - 0.45));
+  ctx.lineTo(x2 - ux * 16 - 8 * Math.cos(a1 + 0.45), y2 - uy * 16 - 8 * Math.sin(a1 + 0.45));
+  ctx.closePath(); ctx.fillStyle = color; ctx.fill();
+}
+
+function wallCenter(ori, r, c) {
+  return [(c + 1) * CELL, (r + 1) * CELL];
+}
+
+function positionMatches(a) {
+  if (!state || !a) return false;
+  if (state.turn !== a.turn) return false;
+  const k = p => p[0] + ',' + p[1];
+  if (k(state.positions[0]) !== k(a.positions[0])) return false;
+  if (k(state.positions[1]) !== k(a.positions[1])) return false;
+  const s1 = state.h_walls.map(k).sort().join(), s2 = a.h_walls.map(k).sort().join();
+  if (s1 !== s2) return false;
+  const v1 = state.v_walls.map(k).sort().join(), v2 = a.v_walls.map(k).sort().join();
+  if (v1 !== v2) return false;
+  return true;
+}
+
+function drawAnalysisOverlay() {
+  const a = analysisState;
+  if (!a || !a.pv || !a.pv.length) return;
+  const match = positionMatches(a);
+
+  // PV: numbered arrows + badges, following the analyzed position
+  if (match) {
+    const pos = a.positions.map(p => [p[0], p[1]]);
+    let turn = a.turn;
+    for (let i = 0; i < a.pv.length; i++) {
+      const mv = a.pv[i];
+      const num = String(i + 1);
+      if (mv[0] === 'move') {
+        const [r, c] = mv[1];
+        const from = pos[turn];
+        arrow(from[1] * CELL + CELL / 2, from[0] * CELL + CELL / 2,
+              c * CELL + CELL / 2, r * CELL + CELL / 2, 'rgba(255,255,255,0.8)');
+        badge(c * CELL + CELL / 2, r * CELL + CELL / 2, num, 'rgba(255,255,255,0.95)');
+        pos[turn] = [r, c];
+      } else {
+        const [ori, r, c] = mv[1];
+        const [x, y] = wallCenter(ori, r, c);
+        badge(x, y, num, 'rgba(255,224,130,0.95)');
+      }
+      turn = 1 - turn;
+    }
+  }
+
+  // top moves: gold rank badges (same position to move)
+  if (a.top_moves && a.top_moves.length) {
+    for (let i = 0; i < Math.min(a.top_moves.length, 5); i++) {
+      const mv = a.top_moves[i].move;
+      let x, y;
+      if (mv[0] === 'move') {
+        const [r, c] = mv[1];
+        x = c * CELL + CELL / 2; y = r * CELL + CELL / 2;
+      } else {
+        const [, r, c] = mv[1];
+        [x, y] = wallCenter(mv[0], r, c);
+      }
+      badge(x, y, String(i + 1), 'rgba(255,213,79,0.95)');
+    }
+  }
+}
 
 function applyTransform() {
   if (flip) ctx.setTransform(-1, 0, 0, -1, SIZE, SIZE);
@@ -471,6 +561,7 @@ function render() {
     ctx.fillText(NAMES[i], x, y + 1);
   });
 
+  drawAnalysisOverlay();
   updateHud();
 }
 

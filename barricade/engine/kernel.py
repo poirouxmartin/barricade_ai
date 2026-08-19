@@ -72,7 +72,7 @@ ZB_SIZE = 476
 
 # ---- mask pair helpers ----------------------------------------------------
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def bit(hi, lo, i):
     """Bit `i` (0..80) of an 81-bit mask stored as (hi, lo), as np.int64."""
     if i < 64:
@@ -80,7 +80,7 @@ def bit(hi, lo, i):
     return np.int64((hi >> (np.uint64(i) - np.uint64(64))) & U1)
 
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def set_bit(hi, lo, i):
     """Set bit `i`; returns the new (hi, lo) pair."""
     if i < 64:
@@ -88,14 +88,14 @@ def set_bit(hi, lo, i):
     return hi | (U1 << (np.uint64(i) - np.uint64(64))), lo
 
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def shl(hi, lo, k):
     """(hi, lo) << k, truncated to the 81-bit board."""
     ku = np.uint64(k)
     return ((hi << ku) | (lo >> (np.uint64(64) - ku))) & M17, (lo << ku) & M64
 
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def shr(hi, lo, k):
     """(hi, lo) >> k."""
     ku = np.uint64(k)
@@ -104,7 +104,7 @@ def shr(hi, lo, k):
 
 # ---- flood fill -----------------------------------------------------------
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def flood_dist(start, hb_hi, hb_lo, vb_hi, vb_lo, goal_hi, goal_lo):
     """Shortest-path distance from `start` to any cell of `goal`, or INF."""
     if bit(goal_hi, goal_lo, start):
@@ -139,7 +139,7 @@ def flood_dist(start, hb_hi, hb_lo, vb_hi, vb_lo, goal_hi, goal_lo):
     return INF
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def flood_dists(start, hb_hi, hb_lo, vb_hi, vb_lo, dist):
     """Fill `dist` (int64[81]) with BFS distances from `start` (-1 unreachable)."""
     for i in range(81):
@@ -174,7 +174,7 @@ def flood_dists(start, hb_hi, hb_lo, vb_hi, vb_lo, dist):
 
 # ---- move generation ------------------------------------------------------
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def edge_free(a, b, hb_hi, hb_lo, vb_hi, vb_lo):
     """True if the edge between adjacent cells `a` and `b` is open.
 
@@ -192,13 +192,13 @@ def edge_free(a, b, hb_hi, hb_lo, vb_hi, vb_lo):
     return False
 
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def push_move(out, n, t):
     out[n] = t
     return n + 1
 
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def try_jump(pos, t, hb_hi, hb_lo, vb_hi, vb_lo, out, n):
     """`t` is the opponent cell: try the straight jump, then the diagonals."""
     pr = pos // 9
@@ -219,7 +219,7 @@ def try_jump(pos, t, hb_hi, hb_lo, vb_hi, vb_lo, out, n):
     return n
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def gen_moves(pos, opp, hb_hi, hb_lo, vb_hi, vb_lo, out):
     """Write legal move targets for the pawn at `pos` into `out`; returns count."""
     n = 0
@@ -254,7 +254,7 @@ def gen_moves(pos, opp, hb_hi, hb_lo, vb_hi, vb_lo, out):
 
 # ---- wall generation ------------------------------------------------------
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def wall_ok(st, ori, r, c):
     """Mechanical check + both pawns still reach their goals with wall (ori, r, c)."""
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
@@ -284,7 +284,7 @@ def wall_ok(st, ori, r, c):
     return True
 
 
-@njit
+@njit(nogil=True)
 def gen_walls(st, my, opp, out, cap):
     """Candidate legal walls near the opponent's path, capped; returns count."""
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
@@ -393,7 +393,7 @@ def gen_walls(st, my, opp, out, cap):
 
 # ---- evaluation -----------------------------------------------------------
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', nogil=True)
 def eval_fn(st):
     """Static score from the perspective of the side to move."""
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
@@ -416,7 +416,7 @@ def eval_fn(st):
 
 # ---- state transitions ----------------------------------------------------
 
-@njit
+@njit(nogil=True)
 def apply_move(st, t, zob):
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     if turn == 0:
@@ -432,7 +432,7 @@ def apply_move(st, t, zob):
             hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key)
 
 
-@njit
+@njit(nogil=True)
 def apply_wall(st, action, zob):
     w = action - WALL_BASE
     ori = w // 64
@@ -471,8 +471,10 @@ def apply_wall(st, action, zob):
 
 # ---- search ---------------------------------------------------------------
 
-@njit
-def negamax(st, depth, alpha, beta, ply, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget):
+@njit(nogil=True)
+def negamax(st, depth, alpha, beta, ply, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop):
+    if stop[0]:
+        return ABORT
     budget[0] -= 1
     if budget[0] < 0:
         return ABORT
@@ -545,13 +547,13 @@ def negamax(st, depth, alpha, beta, ply, tt_k, tt_v, tt_d, tt_f, tt_m, killers, 
         if depth >= 4 and i >= 2:
             red = 1
         raw = negamax(apply_move(st, moves[i], zob), depth - 1 - red, -beta, -alpha, ply + 1,
-                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop)
         if raw == ABORT:
             return ABORT
         s = -raw
         if red > 0 and s > alpha and s < beta:
             raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha, ply + 1,
-                          tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+                          tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop)
             if raw == ABORT:
                 return ABORT
             s = -raw
@@ -605,13 +607,13 @@ def negamax(st, depth, alpha, beta, ply, tt_k, tt_v, tt_d, tt_f, tt_m, killers, 
                 if depth >= 6 and i >= 4:
                     red = 2
                 raw = negamax(apply_wall(st, walls[i], zob), depth - 1 - red, -beta, -alpha, ply + 1,
-                              tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+                              tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop)
                 if raw == ABORT:
                     return ABORT
                 s = -raw
                 if red > 0 and s > alpha and s < beta:
                     raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha, ply + 1,
-                                  tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+                                  tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop)
                     if raw == ABORT:
                         return ABORT
                     s = -raw
@@ -644,18 +646,28 @@ def negamax(st, depth, alpha, beta, ply, tt_k, tt_v, tt_d, tt_f, tt_m, killers, 
     return best
 
 
-@njit
+@njit(nogil=True)
 def _root_search(st, depth, alpha, beta, moves, nm, walls, nw, ply,
-                 tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget):
-    """Root move loop for one depth level; returns (action, score, aborted)."""
+                 tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop,
+                 out_moves, out_scores, want_out):
+    """Root move loop for one depth level; returns (action, score, aborted).
+
+    When `want_out` is nonzero, each root move's score is recorded in
+    `out_moves`/`out_scores` (moves first, then walls) for multi-PV display.
+    """
+    if stop[0]:
+        return (-1, -MATE - 1, True)
     best_action = -1
     best_score = -MATE - 1
     for i in range(nm):
         raw = negamax(apply_move(st, moves[i], zob), depth - 1, -beta, -alpha, ply + 1,
-                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop)
         if raw == ABORT:
             return (best_action, best_score, True)
         s = -raw
+        if want_out:
+            out_moves[i] = moves[i]
+            out_scores[i] = s
         if s > best_score:
             best_score = s
             best_action = moves[i]
@@ -663,10 +675,13 @@ def _root_search(st, depth, alpha, beta, moves, nm, walls, nw, ply,
             alpha = s
     for i in range(nw):
         raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -beta, -alpha, ply + 1,
-                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop)
         if raw == ABORT:
             return (best_action, best_score, True)
         s = -raw
+        if want_out:
+            out_moves[nm + i] = walls[i]
+            out_scores[nm + i] = s
         if s > best_score:
             best_score = s
             best_action = walls[i]
@@ -675,9 +690,11 @@ def _root_search(st, depth, alpha, beta, moves, nm, walls, nw, ply,
     return (best_action, best_score, False)
 
 
-@njit
-def search_depth(st, depth, hint, prev_score, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget):
-    """One iterative-deepening level at the root. Returns (action, score, aborted)."""
+@njit(nogil=True)
+def search_depth(st, depth, hint, prev_score, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop,
+                 out_moves, out_scores, want_out):
+    """One iterative-deepening level at the root. Returns (action, score, aborted, out_n)
+    where `out_n` is the number of root moves recorded when `want_out` is set."""
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     my = pos0 if turn == 0 else pos1
     opp = pos1 if turn == 0 else pos0
@@ -723,61 +740,25 @@ def search_depth(st, depth, hint, prev_score, tt_k, tt_v, tt_d, tt_f, tt_m, kill
         alpha = -MATE - 1
         beta = MATE + 1
     action, score, aborted = _root_search(st, depth, alpha, beta, moves, nm, walls, nw, 0,
-                                          tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+                                          tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop,
+                                          out_moves, out_scores, want_out)
     if not aborted and action >= 0 and (score <= alpha or score >= beta):
         action, score, aborted = _root_search(st, depth, -MATE - 1, MATE + 1, moves, nm,
                                               walls, nw, 0, tt_k, tt_v, tt_d, tt_f, tt_m,
-                                              killers, zob, budget)
-    return (action, score, aborted)
+                                              killers, zob, budget, stop,
+                                              out_moves, out_scores, want_out)
+    return (action, score, aborted, nm + nw)
 
 
-@njit
-def root_top_moves(st, depth, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget,
-                   out, out_scores):
-    """Multi-PV pass: evaluate every root move at `depth - 1` (full window) and
-    store (action, score) pairs sorted descending by score. Returns the number
-    of moves evaluated (may stop early when the budget runs out).
-
-    Usually cheap: the main search has just filled the TT with depth-1 entries
-    for every root child, so most re-searches are table hits.
-    """
-    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
-    my = pos0 if turn == 0 else pos1
-    opp = pos1 if turn == 0 else pos0
-
-    moves = np.zeros(16, np.int64)
-    nm = gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
-    walls = np.zeros(32, np.int64)
-    nw = 0
-    wl = wl0 if turn == 0 else wl1
-    if wl > 0:
-        nw = gen_walls(st, my, opp, walls, ROOT_WALL_CAP)
-
-    n = 0
-    for i in range(nm):
-        budget[0] -= 1
-        if budget[0] < 0:
-            break
-        raw = negamax(apply_move(st, moves[i], zob), depth - 1, -MATE - 1, MATE + 1, 1,
-                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
-        if raw == ABORT:
-            break
-        out[n] = moves[i]
-        out_scores[n] = -raw
-        n += 1
-    for i in range(nw):
-        budget[0] -= 1
-        if budget[0] < 0:
-            break
-        raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -MATE - 1, MATE + 1, 1,
-                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
-        if raw == ABORT:
-            break
-        out[n] = walls[i]
-        out_scores[n] = -raw
-        n += 1
-
-    for i in range(1, n):
+@njit(nogil=True)
+def root_top_moves(st, depth, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop,
+                   out, out_scores, n_total, n_refine):
+    """Sort the root moves recorded by `search_depth` by score descending, then
+    re-search the top `n_refine` at depth - 1 with a full window for exact scores
+    (the main search only has window-bounded values). Returns the number ranked."""
+    if stop[0] or n_total <= 0:
+        return 0
+    for i in range(1, n_total):
         ai = out[i]
         si = out_scores[i]
         j = i - 1
@@ -787,7 +768,36 @@ def root_top_moves(st, depth, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget
             j -= 1
         out[j + 1] = ai
         out_scores[j + 1] = si
-    return n
+    if depth >= 3 and n_refine > 0:
+        limit = min(n_refine, n_total)
+        for i in range(limit):
+            if stop[0]:
+                break
+            budget[0] -= 1
+            if budget[0] < 0:
+                break
+            a = out[i]
+            if a < WALL_BASE:
+                child = apply_move(st, a, zob)
+            else:
+                child = apply_wall(st, a, zob)
+            raw = negamax(child, depth - 1, -MATE - 1, MATE + 1, 1,
+                          tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget, stop)
+            if raw == ABORT:
+                break
+            out_scores[i] = -raw
+        # exact scores may have changed the order: re-sort the refined prefix
+        for i in range(1, limit):
+            ai = out[i]
+            si = out_scores[i]
+            j = i - 1
+            while j >= 0 and out_scores[j] < si:
+                out[j + 1] = out[j]
+                out_scores[j + 1] = out_scores[j]
+                j -= 1
+            out[j + 1] = ai
+            out_scores[j + 1] = si
+    return n_total
 
 
 # ---- Python-facing helpers ------------------------------------------------

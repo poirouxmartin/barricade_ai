@@ -55,7 +55,8 @@ ROOT_WALL_CAP = 24
 MAX_PLY = 64  # killer-move table depth (plies)
 
 DIST_W = 4
-CONF_W = 0.12
+CONF_W = 0.15
+CONF_FLOOR = 0.3
 
 # ---- zobrist layout -------------------------------------------------------
 ZB_POS1 = 81
@@ -404,8 +405,12 @@ def eval_fn(st):
         my_d, opp_d, my_w, opp_w = d1, d0, wl1, wl0
     dist_adv = (opp_d - my_d) * DIST_W
     if dist_adv > 0:
-        conf = max(1.0 - CONF_W * opp_w, 0.05)
-        dist_adv = np.int64(dist_adv * conf)
+        # a lead is only unreliable when the opponent holds more walls than us
+        # (they can still block us); with equal or fewer, the lead is fully trusted.
+        excess = opp_w - my_w
+        if excess > 0:
+            conf = max(1.0 - CONF_W * excess, CONF_FLOOR)
+            dist_adv = np.int64(dist_adv * conf)
     return dist_adv + (my_w - opp_w)
 
 

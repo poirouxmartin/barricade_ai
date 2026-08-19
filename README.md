@@ -20,7 +20,7 @@ Un minuteur est optionnel : taper « mode temps » dans la boîte de dialogue (0
   - `alphabeta.py` — negamax alpha-beta Python : deepening itératif, table de transposition, murs ciblés sur le chemin adverse. Fallback sans numba ; dans l'UI l'option « alpha-beta » utilise le kernel compilé.
   - `kernel.py` + `numba_engine.py` — recherche compilée numba (masques 81 bits en paires hi/lo uint64) : ~2,5-2,8M nœuds/s, depth 12 en 2s. IA par défaut si numba est installé.
   - `mcts.py` — MCTS compilé numba (UCT, un nœud par itération, playouts course BFS-greedy, valeur de feuille normalisée `tanh(score/30)`). Expérimental : correct mais plus faible que le kernel à temps égal (limite classique du MCTS à playouts légers sur ce jeu).
-  - `evaluate.py` — évaluation : distance à l'arrivée (différence), ratio de confiance pondéré par les barricades adverses, avantage de murs restants.
+  - `evaluate.py` — évaluation : distance à l'arrivée (différence), confiance réduite seulement si l'adversaire garde un surplus de barricades, avantage de murs restants.
   - `bitboard.py` — primitives bitboard partagées (flood, `wall_ok`).
   - `greedy.py`, `random.py` — placeholders.
 - `barricade/web/` — serveur local + API JSON + UI HTML/Canvas.
@@ -29,7 +29,7 @@ Un minuteur est optionnel : taper « mode temps » dans la boîte de dialogue (0
 ## Feuille de route IA
 
 1. ✅ Alpha-beta (negamax) : deepening itératif, table de transposition, ordre des coups, murs ciblés.
-2. ✅ Évaluation : distance à l'arrivée → différence avec l'adversaire, ratio de confiance pondéré par les barricades adverses.
+2. ✅ Évaluation : distance à l'arrivée → différence avec l'adversaire, confiance réduite seulement en cas de surplus de barricades adverse, avantage de murs.
 3. ✅ Accélération : bitboards (`engine/bitboard.py`) puis kernel numba (`engine/kernel.py`, `numba_engine.py`) — ~2,5-2,8M nœuds/s, depth 12 en 2s (vs ~60k nœuds/s Python). Killer moves + LMR + aspiration + TT move ordering.
 4. ✅ MCTS numba expérimental (`engine/mcts.py`).
 5. ⏳ Réseau de neurones (supervisé ou RL) si besoin.

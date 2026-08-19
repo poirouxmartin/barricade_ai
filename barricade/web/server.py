@@ -25,6 +25,13 @@ except ImportError:
     MctsEngine = None
     _HAS_MCTS = False
 
+try:
+    from barricade.engine.analysis import AnalysisSession
+    _HAS_ANALYSIS = True
+except ImportError:
+    AnalysisSession = None
+    _HAS_ANALYSIS = False
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 ENGINES = {"random": RandomEngine, "greedy": GreedyEngine}
 if _HAS_NUMBA:
@@ -50,6 +57,7 @@ class App:
         self.depth = depth
         self.time_limit = time_limit
         self.engine = self._make_engine(DEFAULT_ENGINE)
+        self.analysis = None
 
     def _with_lock(self, fn):
         with self.lock:
@@ -160,6 +168,28 @@ class App:
                 "engine": self.engine_name,
                 "progress": getattr(self.engine, "progress", None)}
 
+    def analysis_start(self):
+        if not _HAS_ANALYSIS:
+            return {"error": "analysis requires numba"}
+        if self.analysis is not None:
+            self.analysis.stop()
+        self.analysis = AnalysisSession(self.game)
+        self.analysis.start()
+        return self.analysis.state()
+
+    def analysis_stop(self):
+        if self.analysis is not None:
+            self.analysis.stop()
+            state = self.analysis.state()
+            self.analysis = None
+            return state
+        return {"running": False}
+
+    def analysis_state(self):
+        if self.analysis is None:
+            return {"running": False}
+        return self.analysis.state()
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "Barricade/1.0"
@@ -203,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(Handler.app.meta())
         elif path == "/api/info":
             self._json(Handler.app.info())
+        elif path == "/api/analysis":
+            self._json(Handler.app.analysis_state())
         else:
             self._json({"error": "not found"}, 404)
 
@@ -224,6 +256,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/ai":
             res, err = app.ai_move()
             self._json(res, 200 if err is None else 400)
+        elif path == "/api/analysis/start":
+            self._json(app.analysis_start())
+        elif path == "/api/analysis/stop":
+            self._json(app.analysis_stop())
         else:
             self._json({"error": "not found"}, 404)
 

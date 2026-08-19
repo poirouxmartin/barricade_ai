@@ -11,6 +11,12 @@ const hintEl = document.getElementById('hint');
 const debugEl = document.getElementById('debug');
 const clockEls = [document.getElementById('c0'), document.getElementById('c1')];
 
+const analEl = document.getElementById('analysis');
+const analStatusEl = document.getElementById('anal-status');
+const analStatsEl = document.getElementById('anal-stats');
+const analPvEl = document.getElementById('anal-pv');
+const analTopEl = document.getElementById('anal-top');
+
 let state = null;
 let display = [[8, 4], [0, 4]]; // animated pawn positions
 let selected = null;            // key of selected own pawn
@@ -24,6 +30,7 @@ let clockAnchorAt = 0;          // performance.now() when current state was rece
 let spent = [0, 0];             // accumulated seconds per player (count-up mode)
 let turnStartedAt = 0;          // performance.now() when the current turn began
 let engines = {};
+let analysisTimer = null;
 
 const key = p => p[0] + ',' + p[1];
 
@@ -197,6 +204,8 @@ document.getElementById('m-cancel').addEventListener('click', closeMenu);
 modeSel.addEventListener('change', onModeChange);
 
 document.getElementById('m-start').addEventListener('click', async () => {
+  stopAnalysis(true);
+  analEl.classList.add('hidden');
   const mode2 = modeSel.value;
   const engine = engineSel.value;
   const aiPlayer = mode2 === 'ai' ? parseInt(sideSel.value, 10) : 1;
@@ -213,6 +222,15 @@ document.getElementById('m-start').addEventListener('click', async () => {
 
 document.getElementById('btn-flip').addEventListener('click', () => {
   flip = !flip;
+});
+
+document.getElementById('btn-analyze').addEventListener('click', () => {
+  if (!state || state.game_over) return;
+  startAnalysis();
+});
+
+document.getElementById('btn-anal-stop').addEventListener('click', () => {
+  stopAnalysis(false);
 });
 
 document.getElementById('chk-debug').addEventListener('change', e => {
@@ -246,6 +264,103 @@ function updateDebugFromInfo(info) {
     lines.push(Object.entries(info.progress).map(([k, v]) => k + ': ' + v).join('  ·  '));
   }
   debugEl.textContent = lines.join('\n');
+}
+
+// ----- analysis -----
+
+function fmtMove(m) {
+  if (!m) return '—';
+  const [kind, arg] = m;
+  if (kind === 'move') return 'Move ' + arg[0] + ':' + arg[1];
+  return 'Wall ' + arg[0] + ' ' + arg[1] + ':' + arg[2];
+}
+
+function winPct(score) {
+  return Math.round(100 / (1 + Math.exp(-score / 8)));
+}
+
+async function startAnalysis() {
+  const res = await api('/api/analysis/start', {});
+  if (res && res.error) {
+    analStatusEl.textContent = 'Unavailable: ' + res.error;
+    analEl.classList.remove('hidden');
+    return;
+  }
+  analEl.classList.remove('hidden');
+  clearInterval(analysisTimer);
+  analysisTimer = setInterval(pollAnalysis, 500);
+  pollAnalysis();
+}
+
+async function stopAnalysis(quiet) {
+  clearInterval(analysisTimer);
+  analysisTimer = null;
+  await api('/api/analysis/stop', {});
+  if (!quiet) pollAnalysis();
+}
+
+async function pollAnalysis() {
+  const a = await api('/api/analysis');
+  renderAnalysis(a);
+}
+
+function renderAnalysis(a) {
+  if (!a || a.error) {
+    analStatusEl.textContent = a && a.error ? 'Error: ' + a.error : '…';
+    return;
+  }
+  const frozen = state && state.turn !== a.turn ? ' · position figée' : '';
+  analStatusEl.textContent = (a.running ? 'searching' : 'stopped') + frozen;
+  if (a.running) analStatusEl.classList.add('pulse');
+  else analStatusEl.classList.remove('pulse');
+
+  if (a.depth === 0) {
+    analStatsEl.textContent = a.running ? 'compiling…' : 'no data yet';
+    analPvEl.textContent = '';
+    analTopEl.innerHTML = '';
+    return;
+  }
+
+  analStatsEl.textContent = 'Depth ' + a.depth
+    + '  ·  Score ' + (a.score > 0 ? '+' : '') + a.score
+    + '  ·  Win ' + winPct(a.score) + '%'
+    + '  ·  ' + a.nodes.toLocaleString() + ' nodes'
+    + '  ·  ' + (a.nps / 1e6).toFixed(2) + 'M nps';
+
+  if (a.pv && a.pv.length) {
+    analPvEl.textContent = 'Best ' + fmtMove(a.pv[0]) + '  ·  PV: ' + a.pv.map(fmtMove).join(' ');
+  } else {
+    analPvEl.textContent = 'Best: ' + (a.best_move ? fmtMove(a.best_move) : '—');
+  }
+
+  analTopEl.innerHTML = '';
+  if (a.top_moves && a.top_moves.length) {
+    const best = a.top_moves[0].score;
+    const worst = a.top_moves[a.top_moves.length - 1].score;
+    const span = Math.max(best - worst, 1);
+    for (let i = 0; i < a.top_moves.length; i++) {
+      const t = a.top_moves[i];
+      const row = document.createElement('div');
+      row.className = 'top-row';
+      const label = document.createElement('span');
+      label.className = 'top-label';
+      label.textContent = (i + 1) + '. ' + fmtMove(t.move);
+      const bar = document.createElement('div');
+      bar.className = 'top-bar-wrap';
+      const fill = document.createElement('div');
+      fill.className = 'top-bar-fill';
+      fill.style.width = Math.max(4, 100 * (best - t.score + span / 4) / (span * 1.25)) + '%';
+      bar.appendChild(fill);
+      const val = document.createElement('span');
+      val.className = 'top-val';
+      const sc = (t.score > 0 ? '+' : '') + t.score;
+      val.textContent = sc + '  ·  ' + winPct(t.score) + '%';
+      row.appendChild(label);
+      row.appendChild(bar);
+      row.appendChild(val);
+      analTopEl.appendChild(row);
+    }
+  }
 }
 
 // ----- rendering -----

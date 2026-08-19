@@ -731,6 +731,65 @@ def search_depth(st, depth, hint, prev_score, tt_k, tt_v, tt_d, tt_f, tt_m, kill
     return (action, score, aborted)
 
 
+@njit
+def root_top_moves(st, depth, tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget,
+                   out, out_scores):
+    """Multi-PV pass: evaluate every root move at `depth - 1` (full window) and
+    store (action, score) pairs sorted descending by score. Returns the number
+    of moves evaluated (may stop early when the budget runs out).
+
+    Usually cheap: the main search has just filled the TT with depth-1 entries
+    for every root child, so most re-searches are table hits.
+    """
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    my = pos0 if turn == 0 else pos1
+    opp = pos1 if turn == 0 else pos0
+
+    moves = np.zeros(16, np.int64)
+    nm = gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
+    walls = np.zeros(32, np.int64)
+    nw = 0
+    wl = wl0 if turn == 0 else wl1
+    if wl > 0:
+        nw = gen_walls(st, my, opp, walls, ROOT_WALL_CAP)
+
+    n = 0
+    for i in range(nm):
+        budget[0] -= 1
+        if budget[0] < 0:
+            break
+        raw = negamax(apply_move(st, moves[i], zob), depth - 1, -MATE - 1, MATE + 1, 1,
+                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+        if raw == ABORT:
+            break
+        out[n] = moves[i]
+        out_scores[n] = -raw
+        n += 1
+    for i in range(nw):
+        budget[0] -= 1
+        if budget[0] < 0:
+            break
+        raw = negamax(apply_wall(st, walls[i], zob), depth - 1, -MATE - 1, MATE + 1, 1,
+                      tt_k, tt_v, tt_d, tt_f, tt_m, killers, zob, budget)
+        if raw == ABORT:
+            break
+        out[n] = walls[i]
+        out_scores[n] = -raw
+        n += 1
+
+    for i in range(1, n):
+        ai = out[i]
+        si = out_scores[i]
+        j = i - 1
+        while j >= 0 and out_scores[j] < si:
+            out[j + 1] = out[j]
+            out_scores[j + 1] = out_scores[j]
+            j -= 1
+        out[j + 1] = ai
+        out_scores[j + 1] = si
+    return n
+
+
 # ---- Python-facing helpers ------------------------------------------------
 
 def make_state(game, zob):

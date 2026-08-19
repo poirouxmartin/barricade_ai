@@ -157,7 +157,7 @@ const sideF = document.getElementById('m-side-f');
 
 const ENGINE_LABELS = {
   kernel: 'kernel (compiled — fast)',
-  alphabeta: 'alphabeta (Python — slow)',
+  alphabeta: 'alphabeta (compiled — fast)',
   mcts: 'mcts (experimental)',
   greedy: 'greedy',
   random: 'random',

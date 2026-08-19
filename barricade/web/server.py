@@ -26,9 +26,13 @@ except ImportError:
     _HAS_MCTS = False
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-ENGINES = {"random": RandomEngine, "greedy": GreedyEngine, "alphabeta": AlphaBetaEngine}
+ENGINES = {"random": RandomEngine, "greedy": GreedyEngine}
 if _HAS_NUMBA:
+    # alpha-beta is backed by the compiled kernel when numba is available
+    ENGINES["alphabeta"] = KernelEngine
     ENGINES["kernel"] = KernelEngine
+else:
+    ENGINES["alphabeta"] = AlphaBetaEngine
 if _HAS_MCTS:
     ENGINES["mcts"] = MctsEngine
 DEFAULT_ENGINE = "kernel" if _HAS_NUMBA else "alphabeta"

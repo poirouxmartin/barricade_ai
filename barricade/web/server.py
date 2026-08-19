@@ -176,7 +176,6 @@ class App:
                     return None, "AI busy"
                 self.thinking = True
                 self.engine_info = None
-                self._set_engine_time(self.game.turn)
             try:
                 action = self.engine.choose_move(self.game)
             finally:

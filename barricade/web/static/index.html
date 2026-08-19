@@ -23,6 +23,10 @@
     <button id="btn-new">New game</button>
     <button id="btn-flip" title="Rotate the board">Rotate</button>
     <button id="btn-analyze" title="Analyze the current position">Analyze</button>
+    <select id="sel-anal-engine" title="Analysis engine" class="hidden">
+      <option value="kernel" selected>Kernel</option>
+      <option value="mcts">MCTS</option>
+    </select>
     <label class="switch" title="Show what the AI sees">
       <input type="checkbox" id="chk-debug"> Debug
     </label>
@@ -36,7 +40,38 @@
     <div id="anal-stats" class="anal-stats"></div>
     <div id="anal-pv" class="anal-pv"></div>
     <div id="anal-top" class="anal-top"></div>
-    <div class="anal-legend">Blanc = PV numérotée · Or = meilleurs coups (1-5)</div>
+    <div class="anal-legend">
+      <div class="leg-item">
+        <svg viewBox="0 0 52 40" width="52" height="40" aria-hidden="true">
+          <rect x="10" y="8" width="24" height="24" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
+          <line x1="2" y1="20" x2="10" y2="20" stroke="#fff" stroke-width="2.5" marker-end="url(#leg-arrow)"/>
+          <circle cx="22" cy="20" r="5" fill="#d9534f"/>
+          <defs>
+            <marker id="leg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#fff"/>
+            </marker>
+          </defs>
+        </svg>
+        <div class="leg-txt"><b>e7</b> — déplacement du pion vers la case e7<span class="leg-sub">(colonnes a–i, rangées 1–9)</span></div>
+      </div>
+      <div class="leg-item">
+        <svg viewBox="0 0 52 40" width="52" height="40" aria-hidden="true">
+          <rect x="6" y="6" width="20" height="20" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
+          <rect x="26" y="6" width="20" height="20" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
+          <rect x="8" y="30" width="36" height="8" rx="3" fill="#43392b"/>
+        </svg>
+        <div class="leg-txt"><b>H e2</b> — mur horizontal sous les cases e2 et f2</div>
+      </div>
+      <div class="leg-item">
+        <svg viewBox="0 0 52 40" width="52" height="40" aria-hidden="true">
+          <rect x="6" y="4" width="20" height="16" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
+          <rect x="6" y="20" width="20" height="16" rx="3" fill="#f4efe6" stroke="#8a8066" stroke-width="1.5"/>
+          <rect x="30" y="6" width="8" height="28" rx="3" fill="#43392b"/>
+        </svg>
+        <div class="leg-txt"><b>V e7</b> — mur vertical à droite des cases e7 et e8</div>
+      </div>
+      <div class="leg-note">Blanc = PV numérotée · Or = meilleurs coups (1-5)</div>
+    </div>
   </div>
   <pre id="debug" class="hidden"></pre>
   <p id="hint"></p>

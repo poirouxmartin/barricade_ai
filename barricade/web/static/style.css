@@ -105,6 +105,11 @@ button.small { padding: 3px 10px; font-size: 12px; }
 }
 .top-val { width: 90px; flex-shrink: 0; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .anal-legend { margin-top: 8px; font-size: 11px; color: var(--muted); opacity: .8; }
+.anal-legend .leg-item { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.anal-legend svg { flex-shrink: 0; }
+.anal-legend .leg-txt { line-height: 1.35; }
+.anal-legend .leg-sub { display: block; color: var(--muted); font-size: 10px; }
+.anal-legend .leg-note { margin-top: 8px; }
 
 @keyframes blink { 50% { opacity: .4; } }
 

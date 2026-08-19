@@ -4,6 +4,7 @@ import time
 from barricade.game import Barricade
 from barricade.engine.analysis import AnalysisSession
 from barricade.engine import kernel
+from barricade.engine.mcts import EVAL_SCALE
 
 
 class AnalysisSessionTest(unittest.TestCase):
@@ -82,6 +83,35 @@ class AnalysisSessionTest(unittest.TestCase):
         s._thread.join(timeout=2.0)
         self.assertFalse(s._thread.is_alive(), "analysis thread did not stop promptly")
         self.assertLess(time.time() - t0, 2.0)
+
+    def test_mcts_analysis(self):
+        g = Barricade()
+        g.apply(("move", (7, 4)), check=False)
+        g.apply(("move", (1, 4)), check=False)
+        s = AnalysisSession(g, engine="mcts")
+        s.start()
+        deadline = time.time() + 30
+        st = s.state()
+        while time.time() < deadline and not st["best_move"]:
+            time.sleep(0.2)
+            st = s.state()
+        s.stop()
+        s._thread.join(timeout=2.0)
+        self.assertFalse(s._thread.is_alive(), "mcts analysis thread did not stop promptly")
+        self.assertEqual(st["error"], None)
+        self.assertEqual(st["engine"], "mcts")
+        self.assertIsNotNone(st["best_move"])
+        self.assertGreater(st["nodes"], 0)
+        self.assertGreater(st["nps"], 0)
+        self.assertTrue(st["top_moves"])
+        self.assertEqual(st["top_moves"][0]["move"], st["best_move"])
+        self.assertGreaterEqual(st["score"], -EVAL_SCALE)
+        self.assertLessEqual(st["score"], EVAL_SCALE)
+
+    def test_unknown_engine_rejected(self):
+        g = Barricade()
+        with self.assertRaises(ValueError):
+            AnalysisSession(g, engine="quantum")
 
     def test_pv_legality(self):
         g = Barricade()

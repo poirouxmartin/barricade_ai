@@ -55,7 +55,7 @@ ROOT_WALL_CAP = 24
 MAX_PLY = 64  # killer-move table depth (plies)
 
 DIST_W = 4
-CONF_W = 0.15
+CONF_W = 0.12  # opponent-wall discount: conf = max(1 - CONF_W * opp_w, CONF_FLOOR)
 CONF_FLOOR = 0.3
 
 # ---- zobrist layout -------------------------------------------------------
@@ -395,7 +395,14 @@ def gen_walls(st, my, opp, out, cap):
 
 @njit(cache=True, inline='always', nogil=True)
 def eval_fn(st):
-    """Static score from the perspective of the side to move."""
+    """Static score from the perspective of the side to move.
+
+    The opponent's remaining walls scale how much we trust our distance lead:
+    with zero walls left they can never lengthen our path (the lead is fully
+    trusted), with many left the lead is discounted. A deficit is never
+    discounted: falling behind stays dangerous, which keeps the engine from
+    walking into traps. Wall parity (my_w - opp_w) is a small bonus.
+    """
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     d0 = flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO)
     d1 = flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO)
@@ -405,12 +412,8 @@ def eval_fn(st):
         my_d, opp_d, my_w, opp_w = d1, d0, wl1, wl0
     dist_adv = (opp_d - my_d) * DIST_W
     if dist_adv > 0:
-        # a lead is only unreliable when the opponent holds more walls than us
-        # (they can still block us); with equal or fewer, the lead is fully trusted.
-        excess = opp_w - my_w
-        if excess > 0:
-            conf = max(1.0 - CONF_W * excess, CONF_FLOOR)
-            dist_adv = np.int64(dist_adv * conf)
+        conf = max(1.0 - CONF_W * opp_w, CONF_FLOOR)
+        dist_adv = np.int64(dist_adv * conf)
     return dist_adv + (my_w - opp_w)
 
 

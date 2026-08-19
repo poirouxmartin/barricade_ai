@@ -168,12 +168,14 @@ class App:
                 "engine": self.engine_name,
                 "progress": getattr(self.engine, "progress", None)}
 
-    def analysis_start(self):
+    def analysis_start(self, engine="kernel"):
         if not _HAS_ANALYSIS:
             return {"error": "analysis requires numba"}
+        if engine not in ("kernel", "mcts"):
+            engine = "kernel"
         if self.analysis is not None:
             self.analysis.stop()
-        self.analysis = AnalysisSession(self.game)
+        self.analysis = AnalysisSession(self.game, engine=engine)
         self.analysis.start()
         return self.analysis.state()
 
@@ -257,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
             res, err = app.ai_move()
             self._json(res, 200 if err is None else 400)
         elif path == "/api/analysis/start":
-            self._json(app.analysis_start())
+            self._json(app.analysis_start(body.get("engine", "kernel")))
         elif path == "/api/analysis/stop":
             self._json(app.analysis_stop())
         else:

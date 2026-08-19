@@ -32,6 +32,20 @@ class TestEvaluate(unittest.TestCase):
         g2 = make([1, 4], [5, 4], walls_left=(0, 10))
         self.assertGreater(evaluate(g1, 0), evaluate(g2, 0))
 
+    def test_confidence_full_when_opponent_out_of_walls(self):
+        # opponent with zero walls can never lengthen our path: full trust
+        g1 = make([3, 4], [4, 4], walls_left=(5, 0))
+        g2 = make([3, 4], [4, 4], walls_left=(5, 5))
+        self.assertGreater(evaluate(g1, 0), evaluate(g2, 0))
+
+    def test_closer_always_better_regardless_of_walls(self):
+        # approaching the goal always helps, for any opponent wall count
+        for opp_w in (0, 3, 10):
+            gA = make([5, 4], [2, 4], walls_left=(5, opp_w))
+            gB = make([4, 4], [2, 4], walls_left=(5, opp_w))
+            with self.subTest(opp_w=opp_w):
+                self.assertGreater(evaluate(gB, 0), evaluate(gA, 0))
+
 
 class TestAlphaBeta(unittest.TestCase):
     def test_wins_in_one(self):

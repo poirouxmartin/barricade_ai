@@ -1,8 +1,12 @@
-"""Continuous analysis session for the Barricade kernel.
+"""Continuous analysis session for the Barricade engines.
 
-Iterative deepening keeps running until stopped; a live snapshot exposes the
-current depth, score, win probability, node/s rate, best move, the principal
-variation, and a ranked list of the top root moves with estimated scores.
+Two engine modes:
+  * "kernel" (default): iterative deepening negamax. A live snapshot exposes
+    the current depth, score, win probability, node/s rate, best move, the
+    principal variation, and a ranked list of the top root moves.
+  * "mcts": UCT search on a persistent tree. Iterations keep running until
+    stopped; the snapshot exposes the best move (most visited child) and the
+    top children with their average value, scaled to the kernel score units.
 """
 
 import math
@@ -13,6 +17,7 @@ import numpy as np
 
 from barricade.engine import kernel
 from barricade.engine.numba_engine import KernelEngine
+from barricade.engine.mcts import MctsEngine, mcts_run, best_action, EVAL_SCALE
 
 MAX_DEPTH = 30
 TOP_MOVES = 5
@@ -21,11 +26,20 @@ PV_LEN = 12
 WIN_K = 8.0  # logistic scale: score -> win probability
 NODE_BUDGET = 100_000_000
 PV_REFRESH_DEPTH = 4  # shallow re-search depth when the TT walk hits a miss
+MCTS_NODES = 1 << 18
+MCTS_TICK = 0.25  # seconds of iterations between snapshot updates
 
 
 class AnalysisSession:
-    def __init__(self, game, max_depth=MAX_DEPTH, top_moves=TOP_MOVES, tt_size=TT_SIZE):
-        self._engine = KernelEngine(max_depth=1, time_limit=1.0, tt_size=tt_size)
+    def __init__(self, game, engine="kernel", max_depth=MAX_DEPTH, top_moves=TOP_MOVES,
+                 tt_size=TT_SIZE, mcts_nodes=MCTS_NODES):
+        if engine not in ("kernel", "mcts"):
+            raise ValueError(f"unknown analysis engine: {engine!r}")
+        self.engine = engine
+        self._tt_size = tt_size
+        self._mcts_nodes = mcts_nodes
+        self._engine = None
+        self._mcts = None
         self.game = game.clone()
         self.max_depth = max_depth
         self.top_moves_n = top_moves
@@ -65,6 +79,7 @@ class AnalysisSession:
         with self._lock:
             return {
                 "running": self.running,
+                "engine": self.engine,
                 "depth": self.depth,
                 "score": self.score,
                 "win_chance": self._win_chance(self.score),
@@ -92,6 +107,20 @@ class AnalysisSession:
         return NODE_BUDGET - max(0, int(self._engine.budget[0]))
 
     def _run(self):
+        try:
+            if self.engine == "mcts":
+                self._run_mcts()
+            else:
+                self._run_kernel()
+        except Exception as e:
+            with self._lock:
+                self.error = str(e)
+        finally:
+            self.running = False
+            self._stop.clear()
+
+    def _run_kernel(self):
+        self._engine = KernelEngine(max_depth=1, time_limit=1.0, tt_size=self._tt_size)
         try:
             self._engine._warmup()
             st = kernel.make_state(self.game, self._engine.zob)
@@ -150,6 +179,49 @@ class AnalysisSession:
         finally:
             self.running = False
             self._stop.clear()
+
+    def _run_mcts(self):
+        me = MctsEngine(max_nodes=self._mcts_nodes, time_limit=MCTS_TICK, seed=7)
+        me._warmup()
+        me._reset_tree()
+        self._mcts = me
+        st = kernel.make_state(self.game, me.zob)
+        t0 = time.time()
+        total = 0
+        while not self._stop.is_set():
+            allowance = int(MCTS_TICK * me.ips_est) + 1000
+            allowance = min(allowance, me.max_nodes - int(me.n_nodes[0]) - 1)
+            if allowance <= 0:
+                break
+            mcts_run(st, allowance, me.pool_st, me.parent, me.cstart, me.ccount,
+                     me.ca, me.cv, me.visits, me.vsum, me.n_nodes, me.next_ch, me.zob)
+            total += allowance
+            if self._stop.is_set():
+                break
+            nc = int(me.ccount[0])
+            base = int(me.cstart[0])
+            best_a = best_action(me.cstart, me.ccount, me.ca, me.cv, me.visits)
+            best_move = kernel.decode_action(best_a) if best_a >= 0 else None
+            cand = []
+            for k in range(nc):
+                c = int(me.ca[base + k])
+                if c >= 0 and int(me.visits[c]) > 0:
+                    # vsum is accumulated from the child's mover (the opponent)
+                    v = -float(me.vsum[c]) / float(me.visits[c])
+                    cand.append((kernel.decode_action(int(me.cv[base + k])),
+                                 int(me.visits[c]), v))
+            cand.sort(key=lambda x: x[1], reverse=True)
+            top = [{"move": mv, "score": int(round(v * EVAL_SCALE))}
+                   for mv, _n, v in cand[:self.top_moves_n]]
+            score = int(round(cand[0][2] * EVAL_SCALE)) if cand else 0
+            with self._lock:
+                self.depth = 1 if cand else 0
+                self.score = score
+                self.nodes = total
+                self.nps = total / max(time.time() - t0, 1e-6)
+                self.best_move = best_move
+                self.pv = [best_move] if best_move else []
+                self.top = top
 
     def _extract_pv(self, best_move):
         pv = [best_move] if best_move else []

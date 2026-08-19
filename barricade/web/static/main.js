@@ -230,6 +230,11 @@ document.getElementById('btn-analyze').addEventListener('click', () => {
   startAnalysis();
 });
 
+const analEngineEl = document.getElementById('sel-anal-engine');
+analEngineEl.addEventListener('change', () => {
+  if (analysisTimer) startAnalysis();
+});
+
 document.getElementById('btn-anal-stop').addEventListener('click', () => {
   stopAnalysis(false);
 });
@@ -283,13 +288,14 @@ function winPct(score) {
 }
 
 async function startAnalysis() {
-  const res = await api('/api/analysis/start', {});
+  const res = await api('/api/analysis/start', { engine: analEngineEl.value });
   if (res && res.error) {
     analStatusEl.textContent = 'Unavailable: ' + res.error;
     analEl.classList.remove('hidden');
     return;
   }
   analEl.classList.remove('hidden');
+  analEngineEl.classList.remove('hidden');
   clearInterval(analysisTimer);
   analysisTimer = setInterval(pollAnalysis, 500);
   pollAnalysis();
@@ -319,17 +325,24 @@ function renderAnalysis(a) {
   else analStatusEl.classList.remove('pulse');
 
   if (a.depth === 0) {
-    analStatsEl.textContent = a.running ? 'compiling…' : 'no data yet';
+    analStatsEl.textContent = a.running ? (a.engine === 'mcts' ? 'sampling…' : 'compiling…') : 'no data yet';
     analPvEl.textContent = '';
     analTopEl.innerHTML = '';
     return;
   }
 
-  analStatsEl.textContent = 'Depth ' + a.depth
-    + '  ·  Score ' + (a.score > 0 ? '+' : '') + a.score
-    + '  ·  Win ' + winPct(a.score) + '%'
-    + '  ·  ' + a.nodes.toLocaleString() + ' nodes'
-    + '  ·  ' + (a.nps / 1e6).toFixed(2) + 'M nps';
+  if (a.engine === 'mcts') {
+    analStatsEl.textContent = 'MCTS  ·  ' + a.nodes.toLocaleString() + ' iters'
+      + '  ·  ' + (a.nps / 1e6).toFixed(2) + 'M ips'
+      + '  ·  Score ' + (a.score > 0 ? '+' : '') + a.score
+      + '  ·  Win ' + winPct(a.score) + '%';
+  } else {
+    analStatsEl.textContent = 'Depth ' + a.depth
+      + '  ·  Score ' + (a.score > 0 ? '+' : '') + a.score
+      + '  ·  Win ' + winPct(a.score) + '%'
+      + '  ·  ' + a.nodes.toLocaleString() + ' nodes'
+      + '  ·  ' + (a.nps / 1e6).toFixed(2) + 'M nps';
+  }
 
   if (a.pv && a.pv.length) {
     analPvEl.textContent = 'Best ' + fmtMove(a.pv[0]) + '  ·  PV: ' + a.pv.map(fmtMove).join(' ');

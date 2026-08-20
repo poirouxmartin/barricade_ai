@@ -10,12 +10,16 @@ Node pool layout (persistent across batches so the tree survives between
 time-budget slices):
   pool_st[MAXN][15]   state tuple of each node
   parent[MAXN]        -1 for the root
-  cstart/ccount       child window [cstart, cstart+ccount) into ca/cv
+  cstart/ccount       child window [cstart, cstart+ccount) into ca/cv/cp
   ca[MAXN_CH]         child node id, -1 until the action is first visited
   cv[MAXN_CH]         encoded action
+  cp[MAXN_CH]         PUCT prior (masked softmax over the legal children)
   visits[MAXN]        visit count
   vsum[MAXN]          sum of results from the mover's perspective
   n_nodes, next_ch    1-element persistent cursors
+
+Selection is PUCT with the policy-net priors; value comes from the pure-race
+playouts (the learned-value MLP is not used by MCTS).
 """
 
 import random
@@ -35,7 +39,7 @@ except ImportError:
 
 WALL_PROB = 0.0
 SIM_PLIES = 60
-UCT_C = 1.4
+PUCT_C = 1.5
 EVAL_SCALE = 30.0
 
 
@@ -58,8 +62,10 @@ def apply_action(st, action, zob):
 
 
 @njit(cache=True)
-def expand(node, pool_st, cstart, ccount, ca, cv, next_ch, zob):
-    """Fill ca/cv with the legal actions of `node` (node ids stay -1)."""
+def expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob):
+    """Fill ca/cv with the legal actions of `node` (node ids stay -1) and set
+    each child's PUCT prior to the masked softmax of the policy-net logits
+    over those legal actions (uniform when the net is untrained)."""
     st = st_tuple(pool_st[node])
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     my = pos0 if turn == 0 else pos1
@@ -104,6 +110,20 @@ def expand(node, pool_st, cstart, ccount, ca, cv, next_ch, zob):
             ca[base + n] = -1
             cv[base + n] = walls[i]
             n += 1
+    if n > 0:
+        logits = np.empty(kernel.NN_POL, np.float64)
+        kernel.nn_policy_logits(st, logits)
+        mx = logits[cv[base]]
+        for k in range(1, n):
+            v = logits[cv[base + k]]
+            if v > mx:
+                mx = v
+        zsum = 0.0
+        for k in range(n):
+            cp[base + k] = np.exp(logits[cv[base + k]] - mx)
+            zsum += cp[base + k]
+        for k in range(n):
+            cp[base + k] /= zsum
     cstart[node] = base
     ccount[node] = n
     next_ch[0] = base + n
@@ -188,8 +208,8 @@ def norm_state(st):
 
 
 @njit(cache=True)
-def mcts_run(st, n_iter, pool_st, parent, cstart, ccount, ca, cv, visits, vsum,
-             n_nodes, next_ch, zob):
+def mcts_run(st, n_iter, pool_st, parent, cstart, ccount, ca, cv, cp, visits,
+             vsum, n_nodes, next_ch, zob):
     pool_st[0] = st_array(st)
     max_nodes = pool_st.shape[0]
     for _ in range(n_iter):
@@ -200,37 +220,42 @@ def mcts_run(st, n_iter, pool_st, parent, cstart, ccount, ca, cv, visits, vsum,
                 break
             nc = ccount[node]
             if nc == 0:
-                expand(node, pool_st, cstart, ccount, ca, cv, next_ch, zob)
+                expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob)
                 nc = ccount[node]
                 if nc == 0:
                     break
             base = cstart[node]
-            exp_child = -1
             best_c = -1
+            best_slot = -1
             best_score = -1e300
             for k in range(nc):
                 c = ca[base + k]
-                if c < 0:
-                    exp_child = base + k
-                    break
-                q = -vsum[c] / visits[c]
-                u = UCT_C * np.sqrt(np.log(visits[node] + 1.0) / visits[c])
-                score = q + u
+                if c >= 0:
+                    q = -vsum[c] / visits[c]
+                    u = PUCT_C * cp[base + k] * np.sqrt(visits[node] + 1.0) / (1.0 + visits[c])
+                    score = q + u
+                else:
+                    u = PUCT_C * cp[base + k] * np.sqrt(visits[node] + 1.0)
+                    score = u
                 if score > best_score:
                     best_score = score
                     best_c = c
-            if exp_child >= 0:
+                    best_slot = base + k
+            if best_slot < 0:
+                break
+            if best_c < 0:
+                # expand the highest-prior unvisited child
                 if n_nodes[0] >= max_nodes:
                     break
                 new_id = n_nodes[0]
                 n_nodes[0] += 1
-                ca[exp_child] = new_id
+                ca[best_slot] = new_id
                 parent[new_id] = node
                 cstart[new_id] = 0
                 ccount[new_id] = 0
                 visits[new_id] = 0
                 vsum[new_id] = 0.0
-                pool_st[new_id] = st_array(apply_action(st_tuple(pool_st[node]), cv[exp_child], zob))
+                pool_st[new_id] = st_array(apply_action(st_tuple(pool_st[node]), cv[best_slot], zob))
                 node = new_id
                 break
             node = best_c
@@ -269,6 +294,7 @@ class MctsEngine(Engine):
         self.ccount = np.zeros(max_nodes, np.int64)
         self.ca = np.full(max_ch, -1, np.int64)
         self.cv = np.zeros(max_ch, np.int64)
+        self.cp = np.zeros(max_ch, np.float64)
         self.visits = np.zeros(max_nodes, np.int64)
         self.vsum = np.zeros(max_nodes, np.float64)
         self.n_nodes = np.zeros(1, np.int64)
@@ -288,7 +314,7 @@ class MctsEngine(Engine):
         self._reset_tree()
         st = kernel.make_state(Barricade(), self.zob)
         mcts_run(st, 1000, self.pool_st, self.parent, self.cstart, self.ccount,
-                 self.ca, self.cv, self.visits, self.vsum,
+                 self.ca, self.cv, self.cp, self.visits, self.vsum,
                  self.n_nodes, self.next_ch, self.zob)
 
     def _reset_tree(self):
@@ -346,8 +372,8 @@ class MctsEngine(Engine):
                 break
             t0 = time.time()
             mcts_run(st, allowance, self.pool_st, self.parent, self.cstart,
-                     self.ccount, self.ca, self.cv, self.visits, self.vsum,
-                     self.n_nodes, self.next_ch, self.zob)
+                     self.ccount, self.ca, self.cv, self.cp, self.visits,
+                     self.vsum, self.n_nodes, self.next_ch, self.zob)
             dt = max(time.time() - t0, 1e-6)
             total_iters += allowance
             self.progress = {"iterations": total_iters, "nodes": int(self.n_nodes[0])}

@@ -55,6 +55,7 @@ ENGINES = {
     "detour": lambda **kw: VariantKernelEngine("detour", **kw),
     "fix1c": lambda **kw: VariantKernelEngine("fix1c", **kw),
     "nn": _nn(3),
+    "mcts": None,  # handled in make() (own construction)
 }
 
 

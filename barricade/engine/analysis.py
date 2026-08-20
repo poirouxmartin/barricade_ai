@@ -218,7 +218,8 @@ class AnalysisSession:
             if allowance <= 0:
                 break
             mcts_run(st, allowance, me.pool_st, me.parent, me.cstart, me.ccount,
-                     me.ca, me.cv, me.visits, me.vsum, me.n_nodes, me.next_ch, me.zob)
+                     me.ca, me.cv, me.cp, me.visits, me.vsum,
+                     me.n_nodes, me.next_ch, me.zob)
             total += allowance
             if self._stop.is_set():
                 break

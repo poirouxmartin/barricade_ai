@@ -65,12 +65,13 @@ class TestMcts(unittest.TestCase):
         cc = np.zeros(maxn, np.int64)
         ca = np.full(maxn * 16, -1, np.int64)
         cv = np.zeros(maxn * 16, np.int64)
+        cp = np.zeros(maxn * 16, np.float64)
         vis = np.zeros(maxn, np.int64)
         vs = np.zeros(maxn, np.float64)
         nn = np.zeros(1, np.int64)
         nn[0] = 1
         nc = np.zeros(1, np.int64)
-        mcts_run(st, 20000, pool, parent, cs, cc, ca, cv, vis, vs, nn, nc, zob)
+        mcts_run(st, 20000, pool, parent, cs, cc, ca, cv, cp, vis, vs, nn, nc, zob)
         base = cs[0]
         best_v = -1
         best_a = None

@@ -30,18 +30,29 @@ _HEADER = (
     "rebuilt by tools/make_variant.py.\"\"\"\n"
 )
 
+_WEIGHTS_LINE = 'NN_WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nn_weights.npz")'
+
 
 def _eval_source(name: str) -> str:
     return VARIANTS[name]
 
 
-def build(name: str, force: bool = False) -> Path:
+def build(name: str, force: bool = False, nn_w: int | None = None) -> Path:
     """Write (if missing or force) kernel_<name>.py and return its path."""
     source = KERNEL.read_text(encoding="utf-8")
+    # Variants live in _variants/, so point the MLP weights path back at the
+    # base kernel's directory (the npz is not copied). Do this BEFORE locating
+    # the eval block: the replacement changes the source length and would
+    # invalidate the block offsets.
+    weights_path = (KERNEL.parent / "nn_weights.npz").resolve()
+    source = source.replace(
+        _WEIGHTS_LINE,
+        f"NN_WEIGHTS_PATH = r\"{weights_path}\"",
+    )
     block = _BLOCK.search(source)
     if not block:
         raise RuntimeError("eval_fn block not found in kernel.py")
-    constants = "\n\n" + _constants(name) + "\n"
+    constants = "\n\n" + _constants(name, nn_w) + "\n"
     variant = (
         source[: block.start()]
         + _eval_source(name)
@@ -55,18 +66,20 @@ def build(name: str, force: bool = False) -> Path:
     return out
 
 
-def _constants(name: str) -> str:
+def _constants(name: str, nn_w: int | None = None) -> str:
     consts = ["TEMPO = np.int64(2)"]
     if name == "contact":
         consts.append("CONTACT_W = np.int64(6)")
     if name == "detour":
         consts.append("DETOUR_W = np.int64(2)")
+    if name == "nn":
+        consts.append(f"NN_W = np.int64({int(nn_w)})")
     return "\n".join(consts)
 
 
-def load(name: str, force: bool = False):
+def load(name: str, force: bool = False, nn_w: int | None = None):
     """Build if needed and import the variant kernel module."""
-    path = build(name, force=force)
+    path = build(name, force=force, nn_w=nn_w)
     mod_name = f"_variants.kernel_{name}"
     if mod_name in sys.modules:
         return sys.modules[mod_name]
@@ -158,6 +171,38 @@ _reg(
     else:
         contact = 0
     return dist_adv + (my_w - opp_w) + TEMPO + contact
+""",
+)
+
+
+_reg(
+    "nn",
+    "detour + weighted learned term: nn_value is a small MLP predicting P1's "
+    "win probability from handcrafted features (see kernel.nn_value).",
+    """
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    d0 = flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO)
+    d1 = flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO)
+    if turn == 0:
+        my_d, opp_d, my_w, opp_w = d0, d1, wl0, wl1
+        my_p, opp_p = pos0, pos1
+    else:
+        my_d, opp_d, my_w, opp_w = d1, d0, wl1, wl0
+        my_p, opp_p = pos1, pos0
+    m_my = (my_p // 9 if turn == 0 else 8 - my_p // 9) + abs(my_p % 9 - 4)
+    m_opp = (opp_p // 9 if turn != 0 else 8 - opp_p // 9) + abs(opp_p % 9 - 4)
+    dist_adv = (opp_d - my_d) * DIST_W
+    if dist_adv > 0:
+        conf = max(1.0 - CONF_W * opp_w, CONF_FLOOR)
+        dist_adv = np.int64(dist_adv * conf)
+    obstruction = (opp_d - m_opp) - (my_d - m_my)
+    base = dist_adv + (my_w - opp_w) + TEMPO + DETOUR_W * obstruction
+    if NN_W != 0:
+        nn_t = nn_value(d0, d1, pos0, pos1, wl0, wl1, plies)
+        if turn == 1:
+            nn_t = -nn_t
+        base += NN_W * np.int64(nn_t * MLP_SCALE)
+    return base
 """,
 )
 

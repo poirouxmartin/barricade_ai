@@ -151,5 +151,46 @@ class TestKernelEngine(unittest.TestCase):
         self.assertGreaterEqual(agreed / total, 0.5)
 
 
+class TestLearnedEval(unittest.TestCase):
+    def test_nn_value_bounded(self):
+        rng = random.Random(11)
+        for _ in range(20):
+            g = random_state(rng)
+            st = st_from(g)
+            v = float(kernel.nn_value(int(st[0]), int(st[1]), int(st[0]),
+                                      int(st[1]), int(st[2]), int(st[3]),
+                                      int(st[12])))
+            self.assertGreaterEqual(v, -1.0)
+            self.assertLessEqual(v, 1.0)
+
+    def test_eval_unchanged_with_nn_off(self):
+        # Production keeps NN_W = 0, so eval_fn must equal the handcrafted
+        # detour formula; the learned term must not leak into the search.
+        self.assertEqual(int(kernel.NN_W), 0)
+        rng = random.Random(7)
+        for _ in range(20):
+            g = random_state(rng)
+            st = st_from(g)
+            pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+            d0 = int(kernel.flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo,
+                                       kernel.GOAL0_HI, kernel.GOAL0_LO))
+            d1 = int(kernel.flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo,
+                                       kernel.GOAL1_HI, kernel.GOAL1_LO))
+            if turn == 0:
+                my_d, opp_d, my_w, opp_w, my_p, opp_p = d0, d1, wl0, wl1, pos0, pos1
+            else:
+                my_d, opp_d, my_w, opp_w, my_p, opp_p = d1, d0, wl1, wl0, pos1, pos0
+            m_my = (my_p // 9 if turn == 0 else 8 - my_p // 9) + abs(my_p % 9 - 4)
+            m_opp = (opp_p // 9 if turn != 0 else 8 - opp_p // 9) + abs(opp_p % 9 - 4)
+            dist_adv = (opp_d - my_d) * kernel.DIST_W
+            if dist_adv > 0:
+                conf = max(1.0 - kernel.CONF_W * opp_w, kernel.CONF_FLOOR)
+                dist_adv = np.int64(dist_adv * conf)
+            obstruction = (opp_d - m_opp) - (my_d - m_my)
+            expected = int(dist_adv + (my_w - opp_w) + kernel.TEMPO
+                           + kernel.DETOUR_W * obstruction)
+            self.assertEqual(int(kernel.eval_fn(st)), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

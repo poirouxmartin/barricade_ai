@@ -23,6 +23,8 @@ nopython mode), which drives iterative deepening one depth at a time through
 `search_depth`; the kernel itself never checks the clock.
 """
 
+import os
+
 import numpy as np
 from numba import njit
 
@@ -59,6 +61,101 @@ CONF_W = 0.12  # opponent-wall discount: conf = max(1 - CONF_W * opp_w, CONF_FLO
 CONF_FLOOR = 0.3
 TEMPO = np.int64(2)     # bonus for the side to move
 DETOUR_W = np.int64(2)  # obstruction term weight (extra plies forced by walls)
+
+# ---- learned evaluation (small MLP, trained offline) -----------------------
+# `nn_value` maps 11 handcrafted features to a win probability in [-1, 1]
+# from P1's perspective. Weights are loaded from nn_weights.npz next to this
+# module; when absent the net is a no-op (zeros) and NN_W is 0, so the base
+# eval is unchanged. NN_W is overridden to a positive weight in the generated
+# `nn` variants (tools/make_variant.py) used to A/B test the learned term.
+
+NN_WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nn_weights.npz")
+MLP_HID = 32
+MLP_FEATS = 11
+MLP_SCALE = np.int64(8)  # eval units per full +/-1 win-probability swing
+NN_W = np.int64(0)       # blend weight for the learned term (0 = off)
+
+# Fixed weight buffers: weights are copied INTO these arrays so numba (which
+# captures the array objects at compile time and caches the compiled code on
+# disk) always sees the current values, even after a retrain in another run.
+MLP_W1 = np.zeros((MLP_HID, MLP_FEATS), np.float64)
+MLP_b1 = np.zeros(MLP_HID, np.float64)
+MLP_W2 = np.zeros((MLP_HID, MLP_HID), np.float64)
+MLP_b2 = np.zeros(MLP_HID, np.float64)
+MLP_W3 = np.zeros(MLP_HID, np.float64)
+MLP_b3 = np.zeros(1, np.float64)
+
+
+def _load_mlp_weights():
+    if not os.path.exists(NN_WEIGHTS_PATH):
+        return
+    _d = np.load(NN_WEIGHTS_PATH)
+    MLP_W1[...] = _d["w1"]
+    MLP_b1[...] = _d["b1"]
+    MLP_W2[...] = _d["w2"]
+    MLP_b2[...] = _d["b2"]
+    MLP_W3[...] = _d["w3"]
+    MLP_b3[...] = _d["b3"]
+
+
+_load_mlp_weights()
+
+
+@njit(cache=True, inline='always', nogil=True)
+def nn_features(d0, d1, pos0, pos1, wl0, wl1, plies, f):
+    """Fill `f` (float64[11]) with the learned-eval features.
+
+    All features are absolute (P1 vs P2) and normalized to ~[0, 1]; the
+    perspective is handled by the caller. Same function feeds both the numba
+    eval and the offline trainer, so there is no separate feature scaler.
+    Pawn rows are encoded as *distance to each pawn's own goal* (adv0 = r0,
+    adv1 = 8 - r1) so the starting position is symmetric, preventing the net
+    from learning a wrong base rate at symmetric states.
+      0,1  BFS distances to goal, capped at 16
+      2,3  P1 row advance / column (0..8)
+      4,5  P2 row advance / column (0..8)
+      6,7  walls left
+      8,9  obstruction (BFS - manhattan ideal), capped at 16
+      10   plies, capped at 40
+    """
+    f[0] = min(d0, 16) / 16.0
+    f[1] = min(d1, 16) / 16.0
+    f[2] = (pos0 // 9) / 8.0
+    f[3] = (pos0 % 9) / 8.0
+    f[4] = (8 - pos1 // 9) / 8.0
+    f[5] = (pos1 % 9) / 8.0
+    f[6] = wl0 / 10.0
+    f[7] = wl1 / 10.0
+    r0 = pos0 // 9
+    c0 = pos0 % 9
+    r1 = pos1 // 9
+    c1 = pos1 % 9
+    f[8] = min(d0 - (r0 + abs(c0 - 4)), 16) / 16.0
+    f[9] = min(d1 - ((8 - r1) + abs(c1 - 4)), 16) / 16.0
+    f[10] = min(plies, 40) / 40.0
+
+
+@njit(cache=True, inline='always', nogil=True)
+def nn_value(d0, d1, pos0, pos1, wl0, wl1, plies):
+    """Learned win probability from P1's perspective, in [-1, 1]."""
+    f = np.empty(MLP_FEATS, np.float64)
+    nn_features(d0, d1, pos0, pos1, wl0, wl1, plies, f)
+    h = np.empty(MLP_HID, np.float64)
+    for i in range(MLP_HID):
+        acc = MLP_b1[i]
+        for j in range(MLP_FEATS):
+            acc += MLP_W1[i, j] * f[j]
+        h[i] = np.tanh(acc)
+    h2 = np.empty(MLP_HID, np.float64)
+    for i in range(MLP_HID):
+        acc = MLP_b2[i]
+        for j in range(MLP_HID):
+            acc += MLP_W2[i, j] * h[j]
+        h2[i] = np.tanh(acc)
+    out = MLP_b3[0]
+    for j in range(MLP_HID):
+        out += MLP_W3[j] * h2[j]
+    return np.tanh(out)
 
 # ---- zobrist layout -------------------------------------------------------
 ZB_POS1 = 81
@@ -420,7 +517,14 @@ def eval_fn(st):
         conf = max(1.0 - CONF_W * opp_w, CONF_FLOOR)
         dist_adv = np.int64(dist_adv * conf)
     obstruction = (opp_d - m_opp) - (my_d - m_my)
-    return dist_adv + (my_w - opp_w) + TEMPO + DETOUR_W * obstruction
+    base = dist_adv + (my_w - opp_w) + TEMPO + DETOUR_W * obstruction
+    if NN_W != 0:
+        # learned term (off by default; enabled in the generated nn variants)
+        nn_t = nn_value(d0, d1, pos0, pos1, wl0, wl1, plies)
+        if turn == 1:
+            nn_t = -nn_t
+        base += NN_W * np.int64(nn_t * MLP_SCALE)
+    return base
 
 
 # ---- state transitions ----------------------------------------------------
@@ -860,6 +964,16 @@ def make_state(game, zob):
 def make_zobrist(seed=42):
     rng = np.random.default_rng(seed)
     return rng.integers(-(1 << 62), 1 << 62, size=ZB_SIZE, dtype=np.int64)
+
+
+def nn_features_row(game, zob):
+    """11-feature row for the learned eval, from a Game object."""
+    st = make_state(game, zob)
+    d0 = int(flood_dist(st[0], st[4], st[5], st[6], st[7], GOAL0_HI, GOAL0_LO))
+    d1 = int(flood_dist(st[1], st[4], st[5], st[6], st[7], GOAL1_HI, GOAL1_LO))
+    f = np.zeros(MLP_FEATS, np.float64)
+    nn_features(d0, d1, st[0], st[1], st[2], st[3], st[12], f)
+    return f
 
 
 def decode_action(action):

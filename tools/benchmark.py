@@ -32,13 +32,18 @@ LOCKUP_PLIES = 120
 class VariantKernelEngine(KernelEngine):
     """KernelEngine bound to a generated eval-variant kernel module."""
 
-    def __init__(self, variant, max_depth=12, time_limit=2.0, tt_size=1 << 20):
+    def __init__(self, variant, max_depth=12, time_limit=2.0, tt_size=1 << 20,
+                 nn_w=None):
         from tools.make_variant import load
 
         super().__init__(max_depth=max_depth, time_limit=time_limit,
                          tt_size=tt_size)
-        self.kernel = load(variant)
+        self.kernel = load(variant, nn_w=nn_w)
         self.zob = self.kernel.make_zobrist()
+
+
+def _nn(nn_w):
+    return lambda **kw: VariantKernelEngine("nn", nn_w=nn_w, **kw)
 
 
 ENGINES = {
@@ -49,6 +54,7 @@ ENGINES = {
     "contact": lambda **kw: VariantKernelEngine("contact", **kw),
     "detour": lambda **kw: VariantKernelEngine("detour", **kw),
     "fix1c": lambda **kw: VariantKernelEngine("fix1c", **kw),
+    "nn": _nn(3),
 }
 
 

@@ -180,7 +180,7 @@ def simulate(st, zob):
         st = kernel.apply_move(st, moves[best_idx[np.random.randint(0, best_n)]], zob)
     if is_terminal(st):
         return -1.0  # the side to move has just lost
-    return np.tanh(kernel.eval_fn(st) / EVAL_SCALE)
+    return np.tanh(kernel.playout_eval(st) / EVAL_SCALE)
 
 
 @njit(cache=True)
@@ -235,7 +235,7 @@ def race_value(st, zob):
                                            kernel.GOAL0_HI, kernel.GOAL0_LO)
         sign = 1.0 if input_turn == winner else -1.0
         return sign * np.tanh(kernel.DIST_W * loser_dist / EVAL_SCALE)
-    return np.tanh(kernel.eval_fn(st) / EVAL_SCALE)
+    return np.tanh(kernel.playout_eval(st) / EVAL_SCALE)
 
 
 @njit(cache=True)
@@ -446,7 +446,46 @@ class MctsEngine(Engine):
             child = k.apply_wall(st, action, self.zob)
         return child[14] in recent
 
-    def choose_move(self, game):
+    def root_policy(self):
+        """(actions, visit counts) of the root's children after a search.
+
+        Feed for AlphaZero-style self-play: the normalized counts are the
+        policy target of the position, the mover's value target comes from the
+        game outcome. Reads the persistent arrays before the tree is reset.
+        """
+        base = int(self.cstart[0])
+        nc = int(self.ccount[0])
+        acts = np.zeros(nc, np.int64)
+        cnts = np.zeros(nc, np.float64)
+        for k in range(nc):
+            c = int(self.ca[base + k])
+            acts[k] = int(self.cv[base + k])
+            cnts[k] = float(self.visits[c]) if c >= 0 else 0.0
+        return acts, cnts
+
+    def _sample_action(self, tau):
+        """Sample a root child proportional to visits^tau (tau=1 explore,
+        tau->0 exploit). Used by self-play to diversify games."""
+        base = int(self.cstart[0])
+        nc = int(self.ccount[0])
+        acts = []
+        ws = []
+        for k in range(nc):
+            c = int(self.ca[base + k])
+            if c >= 0 and int(self.visits[c]) > 0:
+                acts.append(int(self.cv[base + k]))
+                ws.append(int(self.visits[c]) ** tau)
+        if not acts:
+            return -1
+        total = float(sum(ws))
+        r = random.random() * total
+        for a, w in zip(acts, ws):
+            r -= w
+            if r <= 0:
+                return a
+        return acts[-1]
+
+    def choose_move(self, game, explore=0.0):
         self._warmup()
         self._reset_tree()
         st = kernel.make_state(game, self.zob)
@@ -477,6 +516,8 @@ class MctsEngine(Engine):
             if int(self.n_nodes[0]) >= self.max_nodes - 1:
                 break
         action = best_action(self.cstart, self.ccount, self.ca, self.cv, self.visits)
+        if explore > 0.0:
+            action = self._sample_action(explore)
         if action >= 0:
             best = self._guard_repetition(st, action, recent)
             win = self._immediate_win(game)

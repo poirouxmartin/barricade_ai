@@ -53,6 +53,17 @@ def sign_acc(pred, y):
     return float(agree.float().mean())
 
 
+def visit_ce(logits, mask, counts):
+    """Masked cross-entropy between normalized visit counts and the net's
+    log-softmax over the legal mask (AlphaZero-style policy loss). Rows with
+    no legal moves are excluded by the caller."""
+    logsum = torch.logsumexp(logits.where(mask > 0, float("-inf")), dim=1)
+    logp = logits - logsum.unsqueeze(1)
+    psum = counts.sum(1, keepdim=True).clamp(min=1e-9)
+    targets = counts / psum
+    return -(targets * logp).sum(1)
+
+
 def row_weights(X):
     """Per-row loss weight: near-terminal rows (mover within 2 plies of its
     goal) are rare and carry the conversion signal, so upweight them."""
@@ -80,19 +91,37 @@ def main():
                          "value head on the V labels (start from --init)")
     ap.add_argument("--init", default=None,
                     help="policy weights to load when --value-only")
+    ap.add_argument("--target", choices=["action", "visits"], default="auto",
+                    help="policy target: the played action (data['A']) or the "
+                         "root visit distribution (data['P']+'M'); auto picks "
+                         "visits when present")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     d = np.load(args.data)
     X = torch.tensor(d["X"], dtype=torch.float32)
-    A = torch.tensor(d["A"], dtype=torch.long)
     V = torch.tensor(d["V"], dtype=torch.float32)
+    use_visits = args.target != "action" and "P" in d and "M" in d
+    if use_visits:
+        M = torch.tensor(d["M"], dtype=torch.float32)
+        P = torch.tensor(d["P"], dtype=torch.float32)
+        target = P.argmax(1)
+    else:
+        A = torch.tensor(d["A"], dtype=torch.long)
+        target = A
     n = len(X)
     n_val = max(1, n // 5)
     perm = torch.randperm(n)
     val_idx, tr_idx = perm[:n_val], perm[n_val:]
-    Xv, Av, Vv = X[val_idx], A[val_idx], V[val_idx]
-    Xt, At, Vt = X[tr_idx], A[tr_idx], V[tr_idx]
+    Xv, Vv = X[val_idx], V[val_idx]
+    Xt, Vt = X[tr_idx], V[tr_idx]
+    if use_visits:
+        Tv = (M[val_idx], P[val_idx])
+        Tt = (M[tr_idx], P[tr_idx])
+        at_v, at_t = target[val_idx], target[tr_idx]
+    else:
+        Tv, Tt = A[val_idx], A[tr_idx]
+        at_v, at_t = target[val_idx], target[tr_idx]
     w = row_weights(X)
     Wv, Wt = w[val_idx], w[tr_idx]
 
@@ -132,7 +161,11 @@ def main():
             idx = perm[i:i + args.batch]
             opt.zero_grad()
             lp, vp = model(Xt[idx])
-            ce = (F.cross_entropy(lp, At[idx], reduction="none") * Wt[idx]).mean()
+            if use_visits:
+                Mt, Pt = Tt
+                ce = (visit_ce(lp, Mt[idx], Pt[idx]) * Wt[idx]).mean()
+            else:
+                ce = (F.cross_entropy(lp, Tt[idx], reduction="none") * Wt[idx]).mean()
             mse = (F.mse_loss(vp.squeeze(-1), Vt[idx], reduction="none")
                    * Wt[idx]).mean()
             vw = 1.0 if args.value_only else args.value_weight
@@ -143,7 +176,11 @@ def main():
         model.eval()
         with torch.no_grad():
             lp, vp = model(Xv)
-            ce = (F.cross_entropy(lp, Av, reduction="none") * Wv).mean()
+            if use_visits:
+                Mv, Pv = Tv
+                ce = (visit_ce(lp, Mv, Pv) * Wv).mean()
+            else:
+                ce = (F.cross_entropy(lp, Tv, reduction="none") * Wv).mean()
             mse = (F.mse_loss(vp.squeeze(-1), Vv, reduction="none")
                    * Wv).mean()
             vloss = (0.0 if args.value_only else 1.0) * ce + \
@@ -163,14 +200,16 @@ def main():
     model.eval()
     with torch.no_grad():
         lp, vp = model(Xt)
-        t1 = topk_acc(lp, At, 1)
-        t5 = topk_acc(lp, At, 5)
+        t1 = topk_acc(lp, at_t, 1)
+        t5 = topk_acc(lp, at_t, 5)
         tv = sign_acc(vp.squeeze(-1), Vt)
         lp, vp = model(Xv)
-        v1 = topk_acc(lp, Av, 1)
-        v5 = topk_acc(lp, Av, 5)
+        v1 = topk_acc(lp, at_v, 1)
+        v5 = topk_acc(lp, at_v, 5)
         vv = sign_acc(vp.squeeze(-1), Vv)
-    print(f"train top-1 {t1:.3f} / top-5 {t5:.3f}   value sign acc {tv:.3f}")
+    tag = "visits" if use_visits else "action"
+    print(f"train top-1 {t1:.3f} / top-5 {t5:.3f}   value sign acc {tv:.3f} "
+          f"[{tag}]")
     print(f"val   top-1 {v1:.3f} / top-5 {v5:.3f}   value sign acc {vv:.3f}   "
           f"best val loss {best_val:.4f}")
 

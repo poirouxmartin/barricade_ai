@@ -59,6 +59,8 @@ MAX_PLY = 64  # killer-move table depth (plies)
 DIST_W = 4
 CONF_W = 0.12  # opponent-wall discount: conf = max(1 - CONF_W * opp_w, CONF_FLOOR)
 CONF_FLOOR = 0.3
+TEMPO = np.int64(2)     # MCTS playout eval: bonus for the side to move
+DETOUR_W = np.int64(2)  # MCTS playout eval: obstruction term weight
 
 # ---- learned evaluation (small MLP, trained offline) -----------------------
 # `nn_value` maps 11 handcrafted features to a win probability in [-1, 1]
@@ -577,10 +579,13 @@ def gen_walls(st, my, opp, out, cap):
                 cands[nsl] = s
                 nsl += 1
 
-    # order by Manhattan distance to the opponent pawn
+    # order by Manhattan distance to the opponent pawn (first path-corner
+    # candidate stays first: deliberate ordering heuristic)
     or_ = np.zeros(64, np.int64)
     keys = np.zeros(64, np.int64)
-    for i in range(nsl):
+    or_[0] = cands[0]
+    keys[0] = 0
+    for i in range(1, nsl):
         s = cands[i]
         r = s // 8
         c = s % 8
@@ -622,7 +627,9 @@ def eval_fn(st):
     plus wall-count advantage. Earlier versions added a detour term
     (DETOUR_W * obstruction) and a tempo bonus; they were removed because the
     unscaled obstruction dwarfed the distance signal, making the engine
-    wall-spam and lose to a greedy opponent (see audit).
+    wall-spam and lose to a greedy opponent (see audit). The MCTS playout eval
+    keeps those terms in playout_eval below: a randomized forward search
+    rewards the detour signal, a deep alpha-beta does not.
     """
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     d0 = flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO)
@@ -643,6 +650,38 @@ def eval_fn(st):
             nn_t = -nn_t
         base += NN_W * np.int64(nn_t * MLP_SCALE)
     return base
+
+
+@njit(cache=True, inline='always', nogil=True)
+def playout_eval(st):
+    """MCTS playout/race leaf value from the side to move.
+
+    eval_fn plus TEMPO and the obstruction term (who is actually more
+    detoured by walls: (BFS distance - manhattan ideal) for each side). The
+    MCTS normalizes this with tanh. These terms are deliberately NOT in the
+    kernel's eval_fn: in a randomized forward playout the detour signal helps
+    the search value real blocking, while in a deep alpha-beta the same
+    unscaled term made the engine wall-spam against greedy. The two engines
+    therefore use different leaf evaluations (kernel: eval_fn, mcts:
+    playout_eval).
+    """
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    d0 = flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO)
+    d1 = flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO)
+    if turn == 0:
+        my_d, opp_d, my_w, opp_w = d0, d1, wl0, wl1
+        my_p, opp_p = pos0, pos1
+    else:
+        my_d, opp_d, my_w, opp_w = d1, d0, wl1, wl0
+        my_p, opp_p = pos1, pos0
+    dist_adv = (opp_d - my_d) * DIST_W
+    if dist_adv > 0:
+        conf = max(1.0 - CONF_W * opp_w, CONF_FLOOR)
+        dist_adv = np.int64(dist_adv * conf)
+    m_my = (my_p // 9 if turn == 0 else 8 - my_p // 9) + abs(my_p % 9 - 4)
+    m_opp = (opp_p // 9 if turn != 0 else 8 - opp_p // 9) + abs(opp_p % 9 - 4)
+    obstruction = (opp_d - m_opp) - (my_d - m_my)
+    return dist_adv + (my_w - opp_w) + TEMPO + DETOUR_W * obstruction
 
 
 # ---- state transitions ----------------------------------------------------

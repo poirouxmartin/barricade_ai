@@ -75,6 +75,11 @@ def main():
                     help="weight of the value-head MSE; 0 trains policy only "
                          "(the value head is an experimental leaf evaluator "
                          "and degrades the policy when trained jointly)")
+    ap.add_argument("--value-only", action="store_true",
+                    help="freeze the policy trunk+head and fine-tune only the "
+                         "value head on the V labels (start from --init)")
+    ap.add_argument("--init", default=None,
+                    help="policy weights to load when --value-only")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -92,7 +97,31 @@ def main():
     Wv, Wt = w[val_idx], w[tr_idx]
 
     model = PolicyNet()
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    if args.value_only:
+        if args.init is None:
+            raise SystemExit("--value-only requires --init")
+        w = np.load(args.init)
+        sd = model.state_dict()
+        for k, v in w.items():
+            if k == "w1":
+                sd["fc1.weight"] = torch.tensor(v)
+            elif k == "b1":
+                sd["fc1.bias"] = torch.tensor(v)
+            elif k == "w2":
+                sd["fc2.weight"] = torch.tensor(v)
+            elif k == "b2":
+                sd["fc2.bias"] = torch.tensor(v)
+            elif k == "wp":
+                sd["head.weight"] = torch.tensor(v)
+            elif k == "bp":
+                sd["head.bias"] = torch.tensor(v)
+        model.load_state_dict(sd)
+        for name, p in model.named_parameters():
+            p.requires_grad = name.startswith("fv.")
+        opt = torch.optim.Adam(filter(lambda p: p.requires_grad,
+                                      model.parameters()), lr=args.lr)
+    else:
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     best_val = float("inf")
     best_state = None
     wait = 0
@@ -106,7 +135,9 @@ def main():
             ce = (F.cross_entropy(lp, At[idx], reduction="none") * Wt[idx]).mean()
             mse = (F.mse_loss(vp.squeeze(-1), Vt[idx], reduction="none")
                    * Wt[idx]).mean()
-            loss = ce + args.value_weight * mse
+            vw = 1.0 if args.value_only else args.value_weight
+            cew = 0.0 if args.value_only else 1.0
+            loss = cew * ce + vw * mse
             loss.backward()
             opt.step()
         model.eval()
@@ -115,7 +146,8 @@ def main():
             ce = (F.cross_entropy(lp, Av, reduction="none") * Wv).mean()
             mse = (F.mse_loss(vp.squeeze(-1), Vv, reduction="none")
                    * Wv).mean()
-            vloss = ce + args.value_weight * mse
+            vloss = (0.0 if args.value_only else 1.0) * ce + \
+                (1.0 if args.value_only else args.value_weight) * mse
         if vloss < best_val:
             best_val = vloss
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -152,7 +184,7 @@ def main():
         "wp": model.head.weight.detach().numpy(),
         "bp": model.head.bias.detach().numpy(),
     }
-    if args.value_weight > 0:
+    if args.value_weight > 0 or args.value_only:
         w["wv"] = model.fv.weight.detach().numpy()
         w["bv"] = model.fv.bias.detach().numpy()
     np.savez(out, **w)
@@ -206,7 +238,7 @@ def main():
     dl = np.abs(nb_logits - torch_logits).max()
     print(f"numba vs torch: max |diff| logits {dl:.6f} "
           f"on {len(feats)} val rows")
-    if args.value_weight > 0:
+    if args.value_weight > 0 or args.value_only:
         dv = np.abs(nb_value - torch_value).max()
         print(f"numba vs torch: max |diff| value {dv:.6f}")
 

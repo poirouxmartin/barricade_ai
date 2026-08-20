@@ -221,15 +221,20 @@ def race_value(st, zob):
                 best = moves[i]
         st = kernel.apply_move(st, best, zob)
     if is_terminal(st):
-        # the side that just reached its goal won; the input mover is the
-        # winner iff its identity (input_turn) matches
+        # Soften the win/loss label: a flat +-1 near the goal saturates the
+        # value head (no gradient to train on) and the search stalls on the
+        # wrong prior. Use the loser's remaining BFS distance at the same
+        # scale as the non-terminal eval (DIST_W * margin / EVAL_SCALE).
         if st[0] < 9:
             winner = 0
+            loser_dist = kernel.flood_dist(st[1], st[4], st[5], st[6], st[7],
+                                           kernel.GOAL1_HI, kernel.GOAL1_LO)
         else:
             winner = 1
-        if input_turn == winner:
-            return 1.0
-        return -1.0
+            loser_dist = kernel.flood_dist(st[0], st[4], st[5], st[6], st[7],
+                                           kernel.GOAL0_HI, kernel.GOAL0_LO)
+        sign = 1.0 if input_turn == winner else -1.0
+        return sign * np.tanh(kernel.DIST_W * loser_dist / EVAL_SCALE)
     return np.tanh(kernel.eval_fn(st) / EVAL_SCALE)
 
 
@@ -383,9 +388,11 @@ class MctsEngine(Engine):
         self.REP_WINDOW = 12  # plies; a key seen again inside this window is a repetition
         # Policy priors always use the loaded net (that is the real gain vs the
         # plain playout MCTS). The value head is an experimental leaf
-        # evaluator, off by default: its race-distilled value saturates near
-        # the goal and the MCTS stalls in local cycles, so the forward-greedy
-        # race playouts remain the reliable leaf value.
+        # evaluator, off by default: even with soft (non-saturating) labels its
+        # deterministic distillation of the forward race cannot defend as P2
+        # (benchmark: 6-6 vs greedy with a 12-0 P1/P2 split, vs 11-1 balanced
+        # for the race playouts), so the random forward-greedy race playouts
+        # remain the reliable leaf value.
         self.policy_on = bool(kernel.POLICY_LOADED)
         self.value_on = bool(use_value_net and kernel.POL_VALUE_LOADED)
 

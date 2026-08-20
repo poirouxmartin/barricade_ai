@@ -42,6 +42,7 @@ except ImportError:
 WALL_PROB = 0.0
 SIM_PLIES = 60
 PUCT_C = 1.5
+PRIOR_T = 1.2  # softmax temperature on the policy logits (>1 flattens priors)
 EVAL_SCALE = 30.0
 
 
@@ -125,7 +126,7 @@ def expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob, policy_on):
                     mx = v
             zsum = 0.0
             for k in range(n):
-                cp[base + k] = np.exp(logits[cv[base + k]] - mx)
+                cp[base + k] = np.exp((logits[cv[base + k]] - mx) / PRIOR_T)
                 zsum += cp[base + k]
             for k in range(n):
                 cp[base + k] /= zsum

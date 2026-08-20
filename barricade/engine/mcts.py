@@ -16,10 +16,12 @@ time-budget slices):
   cp[MAXN_CH]         PUCT prior (masked softmax over the legal children)
   visits[MAXN]        visit count
   vsum[MAXN]          sum of results from the mover's perspective
+  nval[MAXN]          policy-net value of the node (mover's perspective)
   n_nodes, next_ch    1-element persistent cursors
 
-Selection is PUCT with the policy-net priors; value comes from the pure-race
-playouts (the learned-value MLP is not used by MCTS).
+Selection is PUCT with the policy-net priors. The leaf value is the policy
+net's value head when loaded and enabled (value_on); otherwise the pure-race
+playouts are used as the reliable fallback.
 """
 
 import random
@@ -62,10 +64,10 @@ def apply_action(st, action, zob):
 
 
 @njit(cache=True)
-def expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob):
+def expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob, policy_on):
     """Fill ca/cv with the legal actions of `node` (node ids stay -1) and set
     each child's PUCT prior to the masked softmax of the policy-net logits
-    over those legal actions (uniform when the net is untrained)."""
+    over those legal actions (uniform when the policy net is off)."""
     st = st_tuple(pool_st[node])
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     my = pos0 if turn == 0 else pos1
@@ -111,19 +113,26 @@ def expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob):
             cv[base + n] = walls[i]
             n += 1
     if n > 0:
-        logits = np.empty(kernel.NN_POL, np.float64)
-        kernel.nn_policy_logits(st, logits)
-        mx = logits[cv[base]]
-        for k in range(1, n):
-            v = logits[cv[base + k]]
-            if v > mx:
-                mx = v
-        zsum = 0.0
-        for k in range(n):
-            cp[base + k] = np.exp(logits[cv[base + k]] - mx)
-            zsum += cp[base + k]
-        for k in range(n):
-            cp[base + k] /= zsum
+        if policy_on:
+            logits = np.empty(kernel.NN_POL, np.float64)
+            val = np.zeros(1, np.float64)
+            dm, do = kernel.nn_policy_dists(st)
+            kernel.nn_policy_value(st, dm, do, logits, val)
+            mx = logits[cv[base]]
+            for k in range(1, n):
+                v = logits[cv[base + k]]
+                if v > mx:
+                    mx = v
+            zsum = 0.0
+            for k in range(n):
+                cp[base + k] = np.exp(logits[cv[base + k]] - mx)
+                zsum += cp[base + k]
+            for k in range(n):
+                cp[base + k] /= zsum
+        else:
+            inv = 1.0 / n
+            for k in range(n):
+                cp[base + k] = inv
     cstart[node] = base
     ccount[node] = n
     next_ch[0] = base + n
@@ -174,6 +183,56 @@ def simulate(st, zob):
 
 
 @njit(cache=True)
+def race_value(st, zob):
+    """Deterministic race projection for a position, from the input mover's
+    perspective in [-1, 1].
+
+    Races SIM_PLIES plies greedily (both sides advancing toward their goals,
+    first best-key move, no randomness). If a side reaches its goal the input
+    mover won/lost accordingly; otherwise the final eval (after an even number
+    of plies, the mover is the input mover) is used. This is the value target
+    the policy net's value head distills: it embeds the tactical race lookahead
+    that the static evaluation alone lacks.
+    """
+    st = norm_state(st)
+    input_turn = st[12]
+    for _ in range(SIM_PLIES):
+        if is_terminal(st):
+            break
+        pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+        my = pos0 if turn == 0 else pos1
+        opp = pos1 if turn == 0 else pos0
+        moves = np.zeros(16, np.int64)
+        nm = kernel.gen_moves(my, opp, hb_hi, hb_lo, vb_hi, vb_lo, moves)
+        if nm == 0:
+            break
+        best_key = 1 << 60
+        best = moves[0]
+        for i in range(nm):
+            mr = moves[i] // 9
+            mc = moves[i] - mr * 9
+            if turn == 0:
+                key = mr * 9 + abs(mc - 4)
+            else:
+                key = (8 - mr) * 9 + abs(mc - 4)
+            if key < best_key:
+                best_key = key
+                best = moves[i]
+        st = kernel.apply_move(st, best, zob)
+    if is_terminal(st):
+        # the side that just reached its goal won; the input mover is the
+        # winner iff its identity (input_turn) matches
+        if st[0] < 9:
+            winner = 0
+        else:
+            winner = 1
+        if input_turn == winner:
+            return 1.0
+        return -1.0
+    return np.tanh(kernel.eval_fn(st) / EVAL_SCALE)
+
+
+@njit(cache=True)
 def backprop(node, v, parent, visits, vsum):
     vcur = v
     while node >= 0:
@@ -209,20 +268,22 @@ def norm_state(st):
 
 @njit(cache=True)
 def mcts_run(st, n_iter, pool_st, parent, cstart, ccount, ca, cv, cp, visits,
-             vsum, n_nodes, next_ch, zob):
+             vsum, nval, n_nodes, next_ch, zob, policy_on, value_on):
     pool_st[0] = st_array(st)
     max_nodes = pool_st.shape[0]
     for _ in range(n_iter):
         node = 0
+        stuck = False
         # selection
         while True:
             if is_terminal(pool_st[node]):
                 break
             nc = ccount[node]
             if nc == 0:
-                expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob)
+                expand(node, pool_st, cstart, ccount, ca, cv, cp, next_ch, zob, policy_on)
                 nc = ccount[node]
                 if nc == 0:
+                    stuck = True
                     break
             base = cstart[node]
             best_c = -1
@@ -242,6 +303,7 @@ def mcts_run(st, n_iter, pool_st, parent, cstart, ccount, ca, cv, cp, visits,
                     best_c = c
                     best_slot = base + k
             if best_slot < 0:
+                stuck = True
                 break
             if best_c < 0:
                 # expand the highest-prior unvisited child
@@ -256,11 +318,23 @@ def mcts_run(st, n_iter, pool_st, parent, cstart, ccount, ca, cv, cp, visits,
                 visits[new_id] = 0
                 vsum[new_id] = 0.0
                 pool_st[new_id] = st_array(apply_action(st_tuple(pool_st[node]), cv[best_slot], zob))
+                if value_on:
+                    val = np.zeros(1, np.float64)
+                    lg = np.empty(kernel.NN_POL, np.float64)
+                    child_st = st_tuple(pool_st[new_id])
+                    dm, do = kernel.nn_policy_dists(child_st)
+                    kernel.nn_policy_value(child_st, dm, do, lg, val)
+                    nval[new_id] = val[0]
                 node = new_id
                 break
             node = best_c
-        # simulation + backprop
-        v = -1.0 if is_terminal(pool_st[node]) else simulate(st_tuple(pool_st[node]), zob)
+        # leaf value + backprop
+        if is_terminal(pool_st[node]) or stuck:
+            v = -1.0  # the side to move has just lost
+        elif value_on:
+            v = nval[node]
+        else:
+            v = simulate(st_tuple(pool_st[node]), zob)
         backprop(node, v, parent, visits, vsum)
 
 
@@ -281,7 +355,8 @@ def best_action(cstart, ccount, ca, cv, visits):
 
 
 class MctsEngine(Engine):
-    def __init__(self, max_nodes=100_000, time_limit=2.0, seed=7):
+    def __init__(self, max_nodes=100_000, time_limit=2.0, seed=7,
+                 use_value_net=False):
         if not _HAS_NUMBA:
             raise ImportError("numba is required for MctsEngine")
         self.time_limit = time_limit
@@ -297,6 +372,7 @@ class MctsEngine(Engine):
         self.cp = np.zeros(max_ch, np.float64)
         self.visits = np.zeros(max_nodes, np.int64)
         self.vsum = np.zeros(max_nodes, np.float64)
+        self.nval = np.zeros(max_nodes, np.float64)
         self.n_nodes = np.zeros(1, np.int64)
         self.next_ch = np.zeros(1, np.int64)
         self.ips_est = 10_000.0  # smoothed iterations/s
@@ -304,6 +380,13 @@ class MctsEngine(Engine):
         self.progress = {}
         self._warm = False
         self.REP_WINDOW = 12  # plies; a key seen again inside this window is a repetition
+        # Policy priors always use the loaded net (that is the real gain vs the
+        # plain playout MCTS). The value head is an experimental leaf
+        # evaluator, off by default: its race-distilled value saturates near
+        # the goal and the MCTS stalls in local cycles, so the forward-greedy
+        # race playouts remain the reliable leaf value.
+        self.policy_on = bool(kernel.POLICY_LOADED)
+        self.value_on = bool(use_value_net and kernel.POL_VALUE_LOADED)
 
     def _warmup(self):
         if self._warm:
@@ -315,7 +398,8 @@ class MctsEngine(Engine):
         st = kernel.make_state(Barricade(), self.zob)
         mcts_run(st, 1000, self.pool_st, self.parent, self.cstart, self.ccount,
                  self.ca, self.cv, self.cp, self.visits, self.vsum,
-                 self.n_nodes, self.next_ch, self.zob)
+                 self.nval, self.n_nodes, self.next_ch, self.zob,
+                 self.policy_on, self.value_on)
 
     def _reset_tree(self):
         self.n_nodes[0] = 1
@@ -373,7 +457,8 @@ class MctsEngine(Engine):
             t0 = time.time()
             mcts_run(st, allowance, self.pool_st, self.parent, self.cstart,
                      self.ccount, self.ca, self.cv, self.cp, self.visits,
-                     self.vsum, self.n_nodes, self.next_ch, self.zob)
+                     self.vsum, self.nval, self.n_nodes, self.next_ch,
+                     self.zob, self.policy_on, self.value_on)
             dt = max(time.time() - t0, 1e-6)
             total_iters += allowance
             self.progress = {"iterations": total_iters, "nodes": int(self.n_nodes[0])}
@@ -386,9 +471,25 @@ class MctsEngine(Engine):
         action = best_action(self.cstart, self.ccount, self.ca, self.cv, self.visits)
         if action >= 0:
             best = self._guard_repetition(st, action, recent)
+            win = self._immediate_win(game)
+            if win is not None:
+                best = win
         self.last_info = {"iterations": total_iters,
                           "nodes": int(self.n_nodes[0])}
         return best
+
+    def _immediate_win(self, game):
+        """If the mover can reach its goal row in one move, return it. The
+        search sometimes stalls one ply short of a win (saturated leaf
+        values), so conversion must never be left to the visit tie-break.
+        Uses the pure-Python game rules (a move to row 0 / row 8 wins), not
+        the kernel state: crossing uint64 masks >= 2**63 back to numba from
+        Python overflows in numba's tuple unboxing."""
+        goal = 0 if game.turn == 0 else 8
+        for a in game.legal_actions():
+            if a[0] == "move" and a[1][0] == goal:
+                return a
+        return None
 
     def _guard_repetition(self, st, action, recent):
         """If the most-visited child repeats a recent position, pick the next

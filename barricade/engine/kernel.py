@@ -158,16 +158,17 @@ def nn_value(d0, d1, pos0, pos1, wl0, wl1, plies):
     return np.tanh(out)
 
 
-# ---- learned policy (move priors for NN-guided MCTS) ----------------------
-# A policy net maps the board to raw logits over the 209 actions (81 moves +
-# 128 wall slots) from the side-to-move perspective. MCTS softmaxes the logits
-# over its legal children and uses them as PUCT priors (replacing the uniform
-# exploration bonus). Weights are loaded from policy_weights.npz next to this
-# module; when absent the buffers stay zero so the logits are all 0 (uniform
-# priors) and MCTS keeps its heuristic behaviour.
+# ---- learned policy + value (move priors and leaf value for MCTS) ----------
+# A two-head net maps the board to raw policy logits over the 209 actions
+# (81 moves + 128 wall slots) and a scalar value in [-1, 1], both from the
+# side-to-move perspective. MCTS softmaxes the logits over its legal children
+# (PUCT priors) and uses the value as the leaf evaluation. Weights are loaded
+# from policy_weights.npz next to this module; when absent the buffers stay
+# zero so logits are all 0 (uniform priors) and MCTS falls back to playouts.
 
 POLICY_WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy_weights.npz")
-NN_IN = 292   # my pawn one-hot + opp pawn one-hot + 64 H slots + 64 V slots + walls left
+NN_IN = 294   # my pawn + opp pawn one-hot, 64 H slots, 64 V slots, walls left,
+              # then my/opp BFS distance to goal (distillation of the eval)
 NN_HID = 64
 NN_POL = 209  # 81 moves + 128 wall slots
 
@@ -178,11 +179,17 @@ POL_W2 = np.zeros((NN_HID, NN_HID), np.float64)
 POL_b2 = np.zeros(NN_HID, np.float64)
 POL_Wp = np.zeros((NN_POL, NN_HID), np.float64)
 POL_bp = np.zeros(NN_POL, np.float64)
+POL_Wv = np.zeros(NN_HID, np.float64)
+POL_bv = np.zeros(1, np.float64)
+
+POLICY_LOADED = False
+POL_VALUE_LOADED = False
 
 
 def _load_policy_weights():
+    global POLICY_LOADED, POL_VALUE_LOADED
     if not os.path.exists(POLICY_WEIGHTS_PATH):
-        return False
+        return
     _d = np.load(POLICY_WEIGHTS_PATH)
     POL_W1[...] = _d["w1"]
     POL_b1[...] = _d["b1"]
@@ -190,20 +197,26 @@ def _load_policy_weights():
     POL_b2[...] = _d["b2"]
     POL_Wp[...] = _d["wp"]
     POL_bp[...] = _d["bp"]
-    return True
+    POLICY_LOADED = True
+    if "wv" in _d and "bv" in _d:
+        POL_Wv[...] = _d["wv"]
+        POL_bv[...] = _d["bv"]
+        POL_VALUE_LOADED = True
 
 
-POLICY_LOADED = _load_policy_weights()
+_load_policy_weights()
 
 
 @njit(cache=True, inline='always', nogil=True)
 def nn_policy_features(st, f):
-    """Fill `f` (float64[292]) with board features from the mover's perspective.
+    """Fill `f` (float64[NN_IN]) with board features from the mover's perspective.
 
     Symmetric for both players: my pawn one-hot (0..81), opp pawn one-hot
     (81..162), horizontal wall slots (162..226), vertical wall slots
-    (226..290), my walls left / opp walls left (290..292). Same function feeds
-    the numba MCTS and the offline trainer.
+    (226..290), my walls left / opp walls left (290..292). The two BFS
+    distances (my/opp to their goals) are appended by the caller so the value
+    head can distill the kernel's evaluation without reconstructing wall
+    connectivity. Same function feeds the numba MCTS and the offline trainer.
     """
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     for i in range(NN_IN):
@@ -229,10 +242,24 @@ def nn_policy_features(st, f):
 
 
 @njit(cache=True, inline='always', nogil=True)
-def nn_policy_logits(st, out):
-    """Raw logits over the 209 actions from the mover's perspective (no softmax)."""
+def nn_policy_dists(st):
+    """(my BFS distance to my goal, opp BFS distance) from the mover's view."""
+    pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
+    d0 = int(flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO))
+    d1 = int(flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO))
+    if turn == 0:
+        return d0, d1
+    return d1, d0
+
+
+@njit(cache=True, inline='always', nogil=True)
+def nn_policy_value(st, d_my, d_opp, logits, value):
+    """Policy logits over the 209 actions and value in [-1, 1], both from the
+    mover's perspective, sharing one trunk forward (no softmax on the logits)."""
     f = np.empty(NN_IN, np.float64)
     nn_policy_features(st, f)
+    f[NN_IN - 2] = d_my / 16.0
+    f[NN_IN - 1] = d_opp / 16.0
     h = np.empty(NN_HID, np.float64)
     for i in range(NN_HID):
         acc = POL_b1[i]
@@ -249,7 +276,11 @@ def nn_policy_logits(st, out):
         acc = POL_bp[k]
         for j in range(NN_HID):
             acc += POL_Wp[k, j] * h2[j]
-        out[k] = acc
+        logits[k] = acc
+    acc = POL_bv[0]
+    for j in range(NN_HID):
+        acc += POL_Wv[j] * h2[j]
+    value[0] = np.tanh(acc)
 
 # ---- zobrist layout -------------------------------------------------------
 ZB_POS1 = 81
@@ -1071,10 +1102,19 @@ def nn_features_row(game, zob):
 
 
 def nn_policy_features_row(game, zob):
-    """292-feature policy row from a Game object (mover's perspective)."""
+    """NN_IN-feature policy row from a Game object (mover's perspective),
+    including the two BFS distances to each goal."""
     st = make_state(game, zob)
     f = np.zeros(NN_IN, np.float64)
     nn_policy_features(st, f)
+    d0 = int(flood_dist(st[0], st[4], st[5], st[6], st[7], GOAL0_HI, GOAL0_LO))
+    d1 = int(flood_dist(st[1], st[4], st[5], st[6], st[7], GOAL1_HI, GOAL1_LO))
+    if st[12] == 0:
+        f[NN_IN - 2] = d0 / 16.0
+        f[NN_IN - 1] = d1 / 16.0
+    else:
+        f[NN_IN - 2] = d1 / 16.0
+        f[NN_IN - 1] = d0 / 16.0
     return f
 
 

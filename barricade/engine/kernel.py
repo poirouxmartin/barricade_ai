@@ -59,8 +59,6 @@ MAX_PLY = 64  # killer-move table depth (plies)
 DIST_W = 4
 CONF_W = 0.12  # opponent-wall discount: conf = max(1 - CONF_W * opp_w, CONF_FLOOR)
 CONF_FLOOR = 0.3
-TEMPO = np.int64(2)     # bonus for the side to move
-DETOUR_W = np.int64(2)  # obstruction term weight (extra plies forced by walls)
 
 # ---- learned evaluation (small MLP, trained offline) -----------------------
 # `nn_value` maps 11 handcrafted features to a win probability in [-1, 1]
@@ -530,7 +528,7 @@ def gen_walls(st, my, opp, out, cap):
                 best = i
     if best < 0:
         return 0
-    path = np.zeros(64, np.int64)
+    path = np.zeros(81, np.int64)
     np_ = 0
     cur = best
     path[np_] = cur
@@ -582,9 +580,7 @@ def gen_walls(st, my, opp, out, cap):
     # order by Manhattan distance to the opponent pawn
     or_ = np.zeros(64, np.int64)
     keys = np.zeros(64, np.int64)
-    or_[0] = cands[0]
-    keys[0] = 0
-    for i in range(1, nsl):
+    for i in range(nsl):
         s = cands[i]
         r = s // 8
         c = s % 8
@@ -621,28 +617,25 @@ def gen_walls(st, my, opp, out, cap):
 def eval_fn(st):
     """Static score from the perspective of the side to move.
 
-    Distance advantage scaled by how much we trust it given the opponent's
-    remaining walls (deficit never discounted). Plus obstruction: who is
-    actually more detoured by walls, measured by (BFS distance - manhattan
-    ideal) for each side. Plus a small tempo bonus for the side to move.
+    Matches evaluate.score exactly: distance advantage scaled by how much we
+    trust it given the opponent's remaining walls (deficit never discounted),
+    plus wall-count advantage. Earlier versions added a detour term
+    (DETOUR_W * obstruction) and a tempo bonus; they were removed because the
+    unscaled obstruction dwarfed the distance signal, making the engine
+    wall-spam and lose to a greedy opponent (see audit).
     """
     pos0, pos1, wl0, wl1, hb_hi, hb_lo, vb_hi, vb_lo, hs_hi, hs_lo, vs_hi, vs_lo, turn, plies, key = st
     d0 = flood_dist(pos0, hb_hi, hb_lo, vb_hi, vb_lo, GOAL0_HI, GOAL0_LO)
     d1 = flood_dist(pos1, hb_hi, hb_lo, vb_hi, vb_lo, GOAL1_HI, GOAL1_LO)
     if turn == 0:
         my_d, opp_d, my_w, opp_w = d0, d1, wl0, wl1
-        my_p, opp_p = pos0, pos1
     else:
         my_d, opp_d, my_w, opp_w = d1, d0, wl1, wl0
-        my_p, opp_p = pos1, pos0
-    m_my = (my_p // 9 if turn == 0 else 8 - my_p // 9) + abs(my_p % 9 - 4)
-    m_opp = (opp_p // 9 if turn != 0 else 8 - opp_p // 9) + abs(opp_p % 9 - 4)
     dist_adv = (opp_d - my_d) * DIST_W
     if dist_adv > 0:
         conf = max(1.0 - CONF_W * opp_w, CONF_FLOOR)
         dist_adv = np.int64(dist_adv * conf)
-    obstruction = (opp_d - m_opp) - (my_d - m_my)
-    base = dist_adv + (my_w - opp_w) + TEMPO + DETOUR_W * obstruction
+    base = dist_adv + (my_w - opp_w)
     if NN_W != 0:
         # learned term (off by default; enabled in the generated nn variants)
         nn_t = nn_value(d0, d1, pos0, pos1, wl0, wl1, plies)

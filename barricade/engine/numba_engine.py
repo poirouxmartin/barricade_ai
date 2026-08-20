@@ -21,6 +21,19 @@ except ImportError:
     _HAS_NUMBA = False
 
 
+def _norm_state(st):
+    """Force the mask fields to uint64. Crossing the Python/numba boundary
+    boxes uint64 masks as Python ints; numba types them int64 if < 2**63 and
+    uint64 otherwise, so a single int64 specialization then overflows on a
+    bit-63 mask (walls H(7,7), V(7,7), H(7,0), V(7,0))."""
+    return (st[0], st[1], st[2], st[3],
+            np.uint64(st[4]), np.uint64(st[5]),
+            np.uint64(st[6]), np.uint64(st[7]),
+            np.uint64(st[8]), np.uint64(st[9]),
+            np.uint64(st[10]), np.uint64(st[11]),
+            st[12], st[13], st[14])
+
+
 class KernelEngine(Engine):
     def __init__(self, max_depth=12, time_limit=2.0, tt_size=1 << 20):
         if not _HAS_NUMBA:
@@ -119,11 +132,11 @@ class KernelEngine(Engine):
         keys = []
         for kind, _player, arg in game.history:
             if kind == "move":
-                st = k.apply_move(st, arg[0] * 9 + arg[1], self.zob)
+                st = _norm_state(k.apply_move(st, arg[0] * 9 + arg[1], self.zob))
             else:
                 ori, r, c = arg
                 ob = 0 if ori == "H" else 1
-                st = k.apply_wall(st, k.WALL_BASE + ob * 64 + r * 8 + c, self.zob)
+                st = _norm_state(k.apply_wall(st, k.WALL_BASE + ob * 64 + r * 8 + c, self.zob))
             keys.append(st[14])
         if len(keys) <= self.REP_WINDOW:
             return set(keys)
@@ -131,6 +144,7 @@ class KernelEngine(Engine):
 
     def _repeats(self, st, action, recent):
         k = self.kernel
+        st = _norm_state(st)
         if action < k.WALL_BASE:
             child = k.apply_move(st, action, self.zob)
         else:

@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 barricade/engine/_variants/
 data/
+# Environment variables
+.env
+.env.local
+.env.*.local

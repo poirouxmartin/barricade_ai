@@ -1,6 +1,10 @@
-# Barricade
+# barricade_ai
 
-2-player strategy game on a 9x9 grid (Quoridor-style). Race to the opposite side of the board, 10 barricades each, jump over the opponent.
+Barricade as played on barricade.gg: two players, a 9x9 grid, ten barricades each, jumping over
+the opponent, first to the opposite side wins. No dice, so a position has an exact value and a
+program can search for it.
+
+Project page: [martinpoiroux.com/en/projects/barricade](https://martinpoiroux.com/en/projects/barricade/)
 
 ## Run
 
@@ -33,3 +37,7 @@ A timer is optional: type "time mode" in the dialog box (0 = none).
 3. ✅ Acceleration: bitboards (`engine/bitboard.py`) then numba kernel (`engine/kernel.py`, `numba_engine.py`) -- ~2.5-2.8M nodes/s, depth 12 in 2s (vs ~60k nodes/s Python). Killer moves + LMR + aspiration + TT move ordering.
 4. ✅ Experimental numba MCTS (`engine/mcts.py`).
 5. ⏳ Neural network (supervised or RL) if needed.
+
+## License
+
+MIT

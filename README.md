@@ -4,7 +4,7 @@ Barricade as played on barricade.gg: two players, a 9x9 grid, ten barricades eac
 the opponent, first to the opposite side wins. No dice, so a position has an exact value and a
 program can search for it.
 
-Project page: [martinpoiroux.com/en/projects/barricade](https://martinpoiroux.com/en/projects/barricade/)
+Project page: [martinpoiroux.com/projets/barricade/](https://martinpoiroux.com/projets/barricade/)
 
 ## Run
 
